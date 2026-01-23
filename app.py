@@ -402,15 +402,21 @@ def ler_planilha_excel(file_path, filename):
             for encoding in encodings:
                 for sep in separadores:
                     try:
+                        # Primeiro tenta ler com cabeçalho (header='infer')
                         df = pd.read_csv(file_path, sep=sep, encoding=encoding, skipinitialspace=True)
-                        # Verifica se leu corretamente (mais de 1 coluna)
                         if len(df.columns) > 1:
                             logger.info(f"✅ CSV lido com sucesso (separador='{sep}', encoding={encoding}): {len(df)} linhas, {len(df.columns)} colunas")
                             break
-                    except Exception as e:
+                    except Exception:
                         continue
                 if df is not None and len(df.columns) > 1:
                     break
+                # Se ainda não tem cabeçalho reconhecível, tenta ler sem cabeçalho
+                try:
+                    df = pd.read_csv(file_path, sep=sep, encoding=encoding, header=None, skipinitialspace=True)
+                    logger.info(f"✅ CSV lido sem cabeçalho (separador='{sep}', encoding={encoding}): {len(df)} linhas, {len(df.columns)} colunas")
+                except Exception:
+                    df = None
             
             # Se ainda não conseguiu, tenta sem especificar separador (detecção automática)
             if df is None or len(df.columns) <= 1:
@@ -429,6 +435,23 @@ def ler_planilha_excel(file_path, filename):
             error_messages.append(f"Erro ao ler CSV: {str(e)}")
         
         if df is not None and not df.empty:
+            # Se o CSV não tem cabeçalho, atribuímos nomes de colunas esperados com base na posição conhecida
+            if df.columns.tolist() == list(range(df.shape[1])):
+                # Mapeamento posicional (ajuste conforme seu CSV)
+                colunas_pos = [
+                    'Empresa',          # 0
+                    'Tipo',            # 1 (ignorado)
+                    'Fase',            # 2 (ignorado)
+                    'Responsavel',     # 3
+                    'Data',            # 4 (ignorado)
+                    # ... campos intermediários ignorados ...
+                    'Temperatura Atual',  # penúltimo antes do ID, ajuste conforme necessidade
+                ]
+                # Preencher até o número de colunas existentes
+                for i, nome in enumerate(colunas_pos):
+                    if i < df.shape[1]:
+                        df.rename(columns={i: nome}, inplace=True)
+                logger.info("Colunas do CSV sem cabeçalho foram renomeadas com base em posições conhecidas.")
             return df
     
     # PRIMEIRO: Verifica assinaturas de arquivo Excel válido
@@ -800,13 +823,12 @@ def processar():
                     # Monta o dicionário de dados da linha (usa valores padrão se coluna não existir)
                     # Busca colunas de forma flexível
                     def buscar_coluna(coluna_principal, alternativas=None):
-                        """Busca coluna no DataFrame, tentando variações"""
+                        """Busca coluna no DataFrame, tentando variações e, se necessário, posições conhecidas."""
                         # Tenta coluna principal
                         if coluna_principal in df.columns:
                             valor = linha.get(coluna_principal, '')
                             if pd.notna(valor):
                                 return str(valor).strip()
-                        
                         # Tenta alternativas
                         if alternativas:
                             for alt in alternativas:
@@ -814,6 +836,18 @@ def processar():
                                     valor = linha.get(alt, '')
                                     if pd.notna(valor):
                                         return str(valor).strip()
+                        # Fallback: tenta usar posição baseada em nomes conhecidos
+                        pos_map = {
+                            'Empresa': 0,
+                            'Responsavel': 3,
+                            'Temperatura da Proposta Follow 1': -2,  # penúltimo campo antes do ID (ajuste conforme CSV)
+                        }
+                        if coluna_principal in pos_map:
+                            idx = pos_map[coluna_principal]
+                            if isinstance(idx, int) and abs(idx) < len(linha):
+                                valor = linha.iloc[idx] if hasattr(linha, 'iloc') else linha[idx]
+                                if pd.notna(valor):
+                                    return str(valor).strip()
                         return ''
                     
                     item = {
