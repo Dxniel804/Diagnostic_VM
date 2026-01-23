@@ -6,3 +6,5 @@ groq==0.9.0
 python-dotenv==1.0.0
 Werkzeug==2.3.7
 reportlab==4.4.9
+lxml==4.9.3
+html5lib==1.1

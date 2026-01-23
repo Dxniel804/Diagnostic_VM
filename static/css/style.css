@@ -1,0 +1,184 @@
+:root {
+    --primary-dark: #1e5f3e;      /* Verde escuro principal */
+    --primary-medium: #2d7a4e;    /* Verde médio */
+    --primary-light: #4a9d6a;     /* Verde claro */
+    --accent-orange: #ff6b35;     /* Laranja vibrante */
+    --accent-orange-light: #ff8c42; /* Laranja mais claro */
+    --success: #27ae60;
+    --warning: #f1c40f;
+    --bg: #f0f7f4;               /* Fundo verde muito claro */
+    --white: #ffffff;
+    --text-muted: #5a6c5d;
+    --card-bg: #ffffff;
+    --gradient-primary: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary-medium) 100%);
+    --gradient-accent: linear-gradient(135deg, var(--accent-orange) 0%, var(--accent-orange-light) 100%);
+}
+
+body { 
+    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+    background: var(--gradient-primary);
+    background-attachment: fixed;
+    margin: 0; 
+    padding: 20px; 
+    min-height: 100vh;
+    color: var(--primary-dark); 
+}
+
+.container { max-width: 1000px; margin: auto; }
+
+header { 
+    background: var(--gradient-primary); 
+    color: white; 
+    padding: 30px; 
+    border-radius: 16px; 
+    margin-bottom: 30px; 
+    box-shadow: 0 8px 25px rgba(30, 95, 62, 0.3);
+    text-align: center;
+    border: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Estilo dos Cards de cada Negócio */
+.card { 
+    background: var(--card-bg); 
+    border-radius: 16px; 
+    padding: 30px; 
+    margin-bottom: 30px; 
+    box-shadow: 0 8px 25px rgba(0,0,0,0.1); 
+    border-left: 6px solid var(--accent-orange);
+    transition: all 0.3s ease;
+    border: 1px solid rgba(74, 157, 106, 0.1);
+}
+
+.card:hover { 
+    transform: translateY(-5px); 
+    box-shadow: 0 15px 35px rgba(30, 95, 62, 0.2);
+    border-left-color: var(--accent-orange-light);
+}
+
+.negocio-header { 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: flex-start; 
+    border-bottom: 1px solid #eee; 
+    padding-bottom: 15px; 
+}
+
+.badge { 
+    padding: 6px 14px; 
+    border-radius: 20px; 
+    font-size: 0.8em; 
+    font-weight: 700; 
+    text-transform: uppercase;
+}
+.badge-fase { background: var(--primary-light); color: white; }
+.badge-resp { background: var(--accent-orange); color: white; margin-left: 5px; }
+
+/* Tabela de Follow-ups */
+.table-container { overflow-x: auto; margin-top: 15px; }
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; color: var(--primary-medium); padding: 12px; border-bottom: 2px solid var(--primary-light); font-size: 0.85em; }
+td { padding: 12px; border-bottom: 1px solid #f9f9f9; font-size: 0.95em; }
+
+/* Caixa de Análise Inteligente */
+.analise-box { 
+    background: linear-gradient(135deg, #fff9e6 0%, #fff3cc 100%); 
+    padding: 20px; 
+    border-radius: 12px; 
+    margin-top: 20px; 
+    border: 2px solid var(--accent-orange-light);
+    color: var(--primary-dark);
+    line-height: 1.6;
+    box-shadow: 0 4px 15px rgba(255, 107, 53, 0.1);
+}
+
+.analise-box strong { color: var(--accent-orange); display: block; margin-bottom: 8px; font-size: 1.1em; }
+
+/* Animação de Carregamento */
+.spinner {
+    margin: 20px auto;
+    width: 60px;
+    height: 60px;
+    border: 6px solid rgba(255, 255, 255, 0.3);
+    border-top: 6px solid var(--accent-orange);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    box-shadow: 0 4px 15px rgba(255, 107, 53, 0.3);
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+#loadingArea p {
+    color: var(--primary-light);
+    animation: blink 1.5s infinite;
+    font-weight: 500;
+}
+
+@keyframes blink {
+    0% { opacity: 1; }
+    50% { opacity: 0.5; }
+    100% { opacity: 1; }
+}
+
+/* Alertas Flash */
+.alert {
+    padding: 15px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+    font-weight: 500;
+    animation: slideIn 0.3s ease-out;
+}
+
+.alert-error {
+    background-color: #fee;
+    border: 1px solid #fcc;
+    color: #c33;
+}
+
+.alert-warning {
+    background-color: #fff3cd;
+    border: 1px solid #ffeaa7;
+    color: #856404;
+}
+
+.alert-success {
+    background-color: #d4edda;
+    border: 1px solid #c3e6cb;
+    color: #155724;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Botão PDF */
+.btn-pdf {
+    display: inline-block;
+    background: var(--gradient-accent);
+    color: white;
+    padding: 14px 28px;
+    border-radius: 12px;
+    text-decoration: none;
+    font-weight: bold;
+    font-size: 1em;
+    transition: all 0.3s ease;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 4px 15px rgba(255, 107, 53, 0.3);
+}
+
+.btn-pdf:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 25px rgba(255, 107, 53, 0.4);
+    background: linear-gradient(135deg, var(--accent-orange-light) 0%, var(--accent-orange) 100%);
+}

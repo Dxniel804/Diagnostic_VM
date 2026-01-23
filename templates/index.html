@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Análise Estratégica de CRM</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        /* Estilos específicos para centralizar o formulário de upload */
+        .upload-container {
+            max-width: 700px;
+            margin: 60px auto;
+            text-align: center;
+        }
+        
+        .upload-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 50px;
+            border-radius: 24px;
+            box-shadow: 0 20px 60px rgba(30, 95, 62, 0.3);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 6px;
+            background: var(--gradient-accent);
+        }
+
+        .upload-icon {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 30px;
+            background: var(--gradient-accent);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 36px;
+            color: white;
+            box-shadow: 0 8px 25px rgba(255, 107, 53, 0.3);
+        }
+
+        .file-input-wrapper {
+            margin: 40px 0;
+            padding: 30px;
+            border: 3px dashed var(--primary-light);
+            border-radius: 16px;
+            transition: all 0.4s ease;
+            background: rgba(74, 157, 106, 0.05);
+            position: relative;
+        }
+
+        .file-input-wrapper:hover {
+            border-color: var(--accent-orange);
+            background: rgba(255, 107, 53, 0.05);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(255, 107, 53, 0.2);
+        }
+
+        .file-input-wrapper::before {
+            content: '📊';
+            position: absolute;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--primary-dark);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        input[type="file"] {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid transparent;
+            border-radius: 12px;
+            background: white;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        input[type="file"]:focus {
+            outline: none;
+            border-color: var(--accent-orange);
+            box-shadow: 0 0 0 4px rgba(255, 107, 53, 0.1);
+        }
+
+        .btn-enviar {
+            background: var(--gradient-accent);
+            color: white;
+            border: none;
+            padding: 18px 50px;
+            border-radius: 16px;
+            font-size: 1.2em;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            transition: all 0.4s ease;
+            box-shadow: 0 8px 25px rgba(255, 107, 53, 0.3);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn-enviar::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+            transition: left 0.6s ease;
+        }
+
+        .btn-enviar:hover::before {
+            left: 100%;
+        }
+
+        .btn-enviar:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 35px rgba(255, 107, 53, 0.4);
+            background: linear-gradient(135deg, var(--accent-orange-light) 0%, var(--accent-orange) 100%);
+        }
+
+        .btn-enviar:active {
+            transform: translateY(-1px);
+        }
+
+        /* Área do Loader */
+        #loadingArea {
+            display: none;
+            margin-top: 30px;
+            padding: 30px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 16px;
+            box-shadow: 0 8px 25px rgba(30, 95, 62, 0.2);
+        }
+
+        .upload-title {
+            background: var(--gradient-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 15px;
+            font-weight: 700;
+        }
+
+        .upload-subtitle {
+            color: var(--text-muted);
+            font-size: 1.1em;
+            line-height: 1.6;
+        }
+
+        /* Animações adicionais */
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
+        }
+
+        .upload-icon {
+            animation: float 3s ease-in-out infinite;
+        }
+
+        /* Responsividade */
+        @media (max-width: 768px) {
+            .upload-container {
+                margin: 20px auto;
+                padding: 0 15px;
+            }
+            
+            .upload-card {
+                padding: 30px 20px;
+            }
+            
+            .btn-enviar {
+                padding: 15px 30px;
+                font-size: 1.1em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container upload-container">
+        <div class="upload-card">
+            <div class="upload-icon">📈</div>
+            
+            <header style="background:none; color:var(--primary); box-shadow:none; padding:0;">
+                <h1 class="upload-title" style="margin-bottom: 10px;">Automação de Follow-up</h1>
+                <p class="upload-subtitle">Suba sua planilha e deixe a IA definir a próxima estratégia de venda.</p>
+            </header>
+
+            <form id="uploadForm" action="/processar" method="post" enctype="multipart/form-data">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% if messages %}
+                        {% for category, message in messages %}
+                            <div class="alert alert-{{ category }}">
+                                {{ message }}
+                            </div>
+                        {% endfor %}
+                    {% endif %}
+                {% endwith %}
+                
+                <div class="file-input-wrapper">
+                    <input type="file" name="file" accept=".xlsx, .xls, .csv" required>
+                </div>
+                
+                <div class="additional-info">
+                    <div class="info-item">
+                        <span class="info-label">📊 Total de Negócios:</span>
+                        <span class="info-value">{{ total }}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">🤖 Análises Geradas:</span>
+                        <span class="info-value">IA Groq</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">📅 Data do Processamento:</span>
+                        <span class="info-value">{{ moment().format('DD/MM/YYYY HH:mm') if moment else 'Agora' }}</span>
+                    </div>
+                    <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(74, 157, 106, 0.2);">
+                        <a href="{{ url_for('index') }}" class="btn-secondary" style="display: inline-block; background: var(--primary-medium); color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: bold; margin-right: 10px;">
+                            🔄 Processar Nova Planilha
+                        </a>
+                        <a href="{{ url_for('limpar_sessao') }}" class="btn-secondary" style="display: inline-block; background: var(--text-muted); color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: bold;">
+                            🧹 Limpar Sessão
+                        </a>
+                    </div>
+                </div>
+                
+                <button type="submit" id="btnEnviar" class="btn-enviar">
+                    Analisar Planilha com IA
+                </button>
+            </form>
+
+            <div id="loadingArea">
+                <div class="spinner"></div>
+                <p><strong>A Inteligência Artificial está processando os dados...</strong></p>
+                <p id="timerMessage" style="font-size: 0.85em; color: #666;">
+                    Como estamos analisando linha por linha, isso pode levar alguns minutos dependendo do tamanho da sua planilha.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('uploadForm');
+        const loadingArea = document.getElementById('loadingArea');
+        const btn = document.getElementById('btnEnviar');
+
+        form.onsubmit = function() {
+            // Desabilita o botão para evitar múltiplos cliques
+            btn.style.display = 'none';
+            // Mostra a animação de carregamento
+            loadingArea.style.display = 'block';
+            
+            // Rola a página para baixo para focar no loader
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        };
+    </script>
+</body>
+</html>

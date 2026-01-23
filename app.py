@@ -29,7 +29,7 @@ app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', os.urandom(24).hex())
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
 
-ALLOWED_EXTENSIONS = {'xlsx', 'xls'}
+ALLOWED_EXTENSIONS = {'xlsx', 'xls', 'csv'}
 
 # Configuração de logging
 logging.basicConfig(
@@ -169,11 +169,21 @@ Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
 
     logger.info(f"Processando negócio: {dados_negocio['negocio']} - Empresa: {dados_negocio['empresa']} - Próximo Follow-up: #{proximo_follow}")
 
+    # Lista de modelos válidos (em ordem de preferência)
+    modelos_validos = [
+        'llama-3.3-70b-versatile',  # Modelo atual recomendado
+        'llama-3.1-8b-instruct',   # Fallback rápido
+        'mixtral-8x7b-32768',       # Alternativa Mixtral
+        'gemma2-9b-it'              # Alternativa Gemma
+    ]
+    
+    modelo_usar = GROQ_MODEL if GROQ_MODEL in modelos_validos else modelos_validos[0]
+    
     # Tenta até o limite configurado caso a API esteja ocupada
     for tentativa in range(MAX_RETRIES):
         try:
             response = client.chat.completions.create(
-                model=GROQ_MODEL,
+                model=modelo_usar,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=800,
                 temperature=0.7
@@ -184,11 +194,25 @@ Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
             # Salva no cache
             cache_analises[hash_cache] = resultado
             
-            logger.info(f"Análise gerada com sucesso para {dados_negocio['negocio']} (tentativa {tentativa + 1})")
+            logger.info(f"Análise gerada com sucesso para {dados_negocio['negocio']} usando modelo {modelo_usar} (tentativa {tentativa + 1})")
             return resultado
             
         except Exception as e:
             error_msg = str(e).lower()
+            
+            # Se o modelo foi descontinuado, tenta outro modelo
+            if "decommissioned" in error_msg or "no longer supported" in error_msg or "model_decommissioned" in error_msg:
+                logger.warning(f"Modelo {modelo_usar} foi descontinuado. Tentando modelo alternativo...")
+                # Tenta próximo modelo da lista
+                idx_atual = modelos_validos.index(modelo_usar) if modelo_usar in modelos_validos else 0
+                if idx_atual < len(modelos_validos) - 1:
+                    modelo_usar = modelos_validos[idx_atual + 1]
+                    logger.info(f"Tentando com modelo alternativo: {modelo_usar}")
+                    continue
+                else:
+                    logger.error(f"Todos os modelos testados foram descontinuados")
+                    return "Erro: Modelo de IA descontinuado. Por favor, atualize o GROQ_MODEL no arquivo .env para 'llama-3.3-70b-versatile'"
+            
             if "rate" in error_msg or "limit" in error_msg or "too many" in error_msg:
                 logger.warning(f"Limite de cota Groq atingido. Tentativa {tentativa + 1}/{MAX_RETRIES}")
                 if tentativa < MAX_RETRIES - 1:
@@ -202,28 +226,164 @@ Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
     return "Não foi possível gerar a análise para este item (limite de tentativas excedido)."
 
 
-def validar_planilha(df):
-    """Valida se a planilha possui as colunas obrigatórias"""
-    colunas_obrigatorias = [
+def normalizar_nome_coluna(nome):
+    """Normaliza nome de coluna removendo acentos, espaços extras, aspas e convertendo para minúsculas"""
+    import unicodedata
+    # Remove aspas primeiro
+    nome = str(nome).replace('"', '').replace("'", "").strip()
+    # Remove acentos
+    nome = unicodedata.normalize('NFD', nome)
+    nome = ''.join(char for char in nome if unicodedata.category(char) != 'Mn')
+    # Remove espaços extras e converte para minúsculas
+    nome = ' '.join(nome.split()).lower()
+    return nome
+
+def encontrar_coluna_similar(df, nome_procurado):
+    """Encontra coluna similar no DataFrame (case-insensitive, sem acentos, ignora 'do')"""
+    nome_normalizado = normalizar_nome_coluna(nome_procurado)
+    
+    # Remove palavras comuns que podem variar para comparação
+    palavras_ignorar = {'do', 'da', 'de', 'o', 'a', 'e', 'up', 'follow', 'proposta', 'da', 'proposta'}
+    
+    def limpar_palavras(texto):
+        palavras = texto.split()
+        return set(p for p in palavras if p not in palavras_ignorar)
+    
+    palavras_procuradas = limpar_palavras(nome_normalizado)
+    
+    # Primeiro tenta match exato (sem palavras ignoradas)
+    for col in df.columns:
+        col_normalizada = normalizar_nome_coluna(str(col))
+        if nome_normalizado == col_normalizada:
+            logger.debug(f"Match exato encontrado: '{col}' -> '{nome_procurado}'")
+            return col
+    
+    # Depois tenta match por palavras importantes
+    melhor_match = None
+    melhor_score = 0
+    
+    for col in df.columns:
+        col_normalizada = normalizar_nome_coluna(str(col))
+        palavras_coluna = limpar_palavras(col_normalizada)
+        
+        if palavras_procuradas and palavras_coluna:
+            # Calcula quantas palavras importantes estão presentes
+            palavras_comuns = palavras_procuradas.intersection(palavras_coluna)
+            if palavras_procuradas:  # Evita divisão por zero
+                score = len(palavras_comuns) / len(palavras_procuradas)
+            else:
+                score = 0
+            
+            # Se encontrou todas as palavras importantes ou pelo menos 60% (reduzido de 70% para ser mais flexível)
+            if score > melhor_score and score >= 0.6:
+                melhor_score = score
+                melhor_match = col
+                logger.debug(f"Match parcial encontrado (score {score:.2f}): '{col}' -> '{nome_procurado}'")
+    
+    return melhor_match
+
+def normalizar_colunas_df(df):
+    """Normaliza nomes das colunas do DataFrame para nomes padrão"""
+    mapeamento = {}
+    
+    # Mapeamento de colunas esperadas para variações possíveis
+    colunas_esperadas = {
+        'Nome do negócio': ['nome do negocio', 'nome do negócio', 'negocio', 'negócio'],
+        'Empresa': ['empresa'],
+        'Fase': ['fase'],
+        'Responsavel': ['responsavel', 'responsável', 'vendedor', 'usuario', 'usuário', 'usuario', 'usuário'],
+        'Temperatura da Proposta Follow 1': ['temperatura da proposta follow 1', 'temperatura follow 1', 'temperatura 1'],
+        'Descrição Follow up 1': ['descrição follow up 1', 'descrição do follow up 1', 'descricao follow up 1', 'descricao do follow up 1', 'descrição do follow up 1', 'descricao do follow up 1', 'follow up 1'],
+        'Temperatura da Proposta Follow 2': ['temperatura da proposta follow 2', 'temperatura follow 2', 'temperatura 2'],
+        'Descrição Follow up 2': ['descrição follow up 2', 'descrição do follow up 2', 'descricao follow up 2', 'descricao do follow up 2', 'follow up 2'],
+        'Temperatura da Proposta Follow 3': ['temperatura da proposta follow 3', 'temperatura follow 3', 'temperatura 3'],
+        'Descrição Follow up 3': ['descrição follow up 3', 'descrição do follow up 3', 'descricao follow up 3', 'descricao do follow up 3', 'follow up 3'],
+        'Temperatura da Proposta Follow 4': ['temperatura da proposta follow 4', 'temperatura follow 4', 'temperatura 4'],
+        'Descrição Follow up 4': ['descrição follow up 4', 'descrição do follow up 4', 'descricao follow up 4', 'descricao do follow up 4', 'follow up 4'],
+        'Temperatura da Proposta Follow 5': ['temperatura da proposta follow 5', 'temperatura follow 5', 'temperatura 5'],
+        'Descrição Follow up 5': ['descrição follow up 5', 'descrição do follow up 5', 'descricao follow up 5', 'descricao do follow up 5', 'follow up 5'],
+    }
+    
+    # Para cada coluna esperada, tenta encontrar no DataFrame
+    for coluna_esperada, variacoes in colunas_esperadas.items():
+        coluna_encontrada = encontrar_coluna_similar(df, coluna_esperada)
+        if coluna_encontrada:
+            mapeamento[coluna_encontrada] = coluna_esperada
+        else:
+            # Tenta com variações
+            for variacao in variacoes:
+                coluna_encontrada = encontrar_coluna_similar(df, variacao)
+                if coluna_encontrada:
+                    mapeamento[coluna_encontrada] = coluna_esperada
+                    break
+    
+    # Renomeia as colunas encontradas
+    if mapeamento:
+        df = df.rename(columns=mapeamento)
+        logger.info(f"Colunas normalizadas ({len(mapeamento)} colunas): {list(mapeamento.items())[:5]}")
+    else:
+        logger.warning("Nenhuma coluna foi normalizada. Verifique se os nomes das colunas estão corretos.")
+    
+    # Cria colunas faltantes com valores vazios (para garantir que o sistema funcione)
+    colunas_esperadas = [
         'Nome do negócio', 'Empresa', 'Fase', 'Responsavel',
-        'Temperatura da Proposta Follow 1', 'Descrição Follow up 1'
+        'Temperatura da Proposta Follow 1', 'Descrição Follow up 1',
+        'Temperatura da Proposta Follow 2', 'Descrição Follow up 2',
+        'Temperatura da Proposta Follow 3', 'Descrição Follow up 3',
+        'Temperatura da Proposta Follow 4', 'Descrição Follow up 4',
+        'Temperatura da Proposta Follow 5', 'Descrição Follow up 5',
     ]
-
-    colunas_faltantes = []
-    for coluna in colunas_obrigatorias:
+    
+    colunas_criadas = []
+    for coluna in colunas_esperadas:
         if coluna not in df.columns:
-            colunas_faltantes.append(coluna)
+            df[coluna] = ''  # Cria coluna vazia
+            colunas_criadas.append(coluna)
+    
+    if colunas_criadas:
+        logger.info(f"Colunas criadas automaticamente (vazias): {', '.join(colunas_criadas)}")
+    
+    return df
 
-    if colunas_faltantes:
-        raise ValueError(f"Colunas obrigatórias faltando: {', '.join(colunas_faltantes)}")
+def validar_planilha(df):
+    """
+    Valida a planilha de forma flexível - apenas informa colunas faltantes, mas NUNCA bloqueia.
+    Esta função sempre retorna True e nunca gera exceções.
+    """
+    try:
+        colunas_desejadas = [
+            'Nome do negócio', 'Empresa', 'Fase', 'Responsavel',
+            'Temperatura da Proposta Follow 1', 'Descrição Follow up 1'
+        ]
 
-    return True
+        colunas_faltantes = []
+        colunas_encontradas = []
+        
+        for coluna in colunas_desejadas:
+            if coluna in df.columns:
+                colunas_encontradas.append(coluna)
+            else:
+                colunas_faltantes.append(coluna)
+
+        if colunas_encontradas:
+            logger.info(f"✅ Colunas encontradas: {', '.join(colunas_encontradas)}")
+        
+        if colunas_faltantes:
+            logger.warning(f"⚠️ Colunas não encontradas (sistema continuará funcionando normalmente): {', '.join(colunas_faltantes)}")
+            logger.info(f"📋 Todas as colunas disponíveis no arquivo: {', '.join(list(df.columns)[:20])}")
+
+        # SEMPRE retorna True - nunca bloqueia
+        return True
+    except Exception as e:
+        # Se der qualquer erro, apenas loga e continua
+        logger.warning(f"Erro na validação (mas continuando): {str(e)}")
+        return True  # Sempre retorna True para não bloquear
 
 
 def ler_planilha_excel(file_path, filename):
     """
-    Lê arquivo Excel com múltiplas estratégias de fallback.
-    Suporta .xlsx, .xls e até arquivos HTML disfarçados de Excel.
+    Lê arquivo Excel/CSV com múltiplas estratégias de fallback.
+    Suporta .xlsx, .xls, .csv e até arquivos HTML disfarçados de Excel.
     """
     file_ext = filename.lower().split('.')[-1] if '.' in filename else ''
     logger.info(f"Processando arquivo.{file_ext}: {filename}")
@@ -231,66 +391,333 @@ def ler_planilha_excel(file_path, filename):
     df = None
     error_messages = []
     
-    # Verifica se é HTML disfarçado de Excel
-    with open(file_path, 'rb') as f:
-        header = f.read(50)
-        is_html = (
-            header.startswith(b'\xef\xbb\xbf<meta') or 
-            header.startswith(b'<meta') or 
-            header.startswith(b'<!DOCTYPE') or 
-            header.startswith(b'<html') or
-            b'<table' in header
-        )
-    
-    if is_html:
-        logger.warning("Conteúdo HTML detectado, tentando converter...")
+    # PRIORIDADE 0: Se for CSV, lê diretamente (mais simples e confiável)
+    if file_ext == 'csv':
+        logger.info("Arquivo CSV detectado, lendo diretamente...")
         try:
-            df_html = pd.read_html(file_path)
-            if df_html and len(df_html) > 0:
-                df = df_html[0]
-                logger.info(f"HTML convertido: {len(df)} linhas, {len(df.columns)} colunas")
+            # Tenta diferentes separadores e encodings comuns
+            separadores = [';', ',', '\t']
+            encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+            
+            for encoding in encodings:
+                for sep in separadores:
+                    try:
+                        df = pd.read_csv(file_path, sep=sep, encoding=encoding, skipinitialspace=True)
+                        # Verifica se leu corretamente (mais de 1 coluna)
+                        if len(df.columns) > 1:
+                            logger.info(f"✅ CSV lido com sucesso (separador='{sep}', encoding={encoding}): {len(df)} linhas, {len(df.columns)} colunas")
+                            break
+                    except Exception as e:
+                        continue
+                if df is not None and len(df.columns) > 1:
+                    break
+            
+            # Se ainda não conseguiu, tenta sem especificar separador (detecção automática)
+            if df is None or len(df.columns) <= 1:
+                for encoding in encodings:
+                    try:
+                        df = pd.read_csv(file_path, encoding=encoding, skipinitialspace=True)
+                        if len(df.columns) > 1:
+                            logger.info(f"✅ CSV lido com detecção automática (encoding={encoding}): {len(df)} linhas, {len(df.columns)} colunas")
+                            break
+                    except Exception as e:
+                        continue
+            
+            if df is None or len(df.columns) <= 1:
+                error_messages.append("Não foi possível ler o CSV com nenhum separador/encoding testado")
         except Exception as e:
-            logger.warning(f"Conversão HTML falhou: {str(e)}")
+            error_messages.append(f"Erro ao ler CSV: {str(e)}")
+        
+        if df is not None and not df.empty:
+            return df
     
-    # Se não é HTML ou conversão falhou, tenta leitura normal
-    if df is None:
+    # PRIMEIRO: Verifica assinaturas de arquivo Excel válido
+    is_valid_excel = False
+    is_html = False
+    
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(8)  # Lê apenas os primeiros 8 bytes para verificar assinatura
+            
+            # Assinaturas de arquivos Excel válidos
+            excel_signatures = [
+                b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1',  # .xls (OLE2 format)
+                b'\x50\x4b\x03\x04',  # .xlsx (ZIP format - começa com PK)
+                b'\x50\x4b\x05\x06',  # .xlsx (ZIP empty)
+                b'\x50\x4b\x07\x08'   # .xlsx (ZIP spanned)
+            ]
+            
+            # Verifica se é um Excel válido
+            for sig in excel_signatures:
+                if header.startswith(sig):
+                    is_valid_excel = True
+                    logger.info(f"Assinatura Excel válida detectada: {sig.hex()}")
+                    break
+            
+            # Se não é Excel válido, verifica se é HTML (lê mais bytes)
+            if not is_valid_excel:
+                f.seek(0)
+                header_full = f.read(500)
+                
+                # Detecta HTML de várias formas (incluindo BOM)
+                # O caso mais comum: arquivo HTML salvo com extensão .xls
+                is_html = (
+                    header_full.startswith(b'\xef\xbb\xbf<meta') or  # BOM + <meta
+                    header_full.startswith(b'<meta') or 
+                    header_full.startswith(b'<!DOCTYPE') or 
+                    header_full.startswith(b'<html') or
+                    header_full.startswith(b'\xef\xbb\xbf<!DOCTYPE') or
+                    header_full.startswith(b'\xef\xbb\xbf<html') or
+                    (b'<table' in header_full and b'<tr>' in header_full and b'<td>' in header_full) or
+                    (b'http-equiv' in header_full and b'Content-type' in header_full)  # Meta tag comum em HTML
+                )
+                
+                if is_html:
+                    logger.warning("HTML detectado no arquivo (arquivo HTML salvo com extensão .xls/.xlsx)")
+    except Exception as e:
+        logger.warning(f"Erro ao verificar header do arquivo: {str(e)}")
+    
+    # PRIORIDADE 1: Tenta ler como Excel primeiro (APENAS se tem assinatura válida E não é HTML)
+    if is_valid_excel and not is_html:
+        logger.info("Tentando ler como arquivo Excel válido...")
+        
+        if file_ext == 'xls':
+            # Para .xls, tenta xlrd primeiro (mais compatível)
+            try:
+                df = pd.read_excel(file_path, engine='xlrd')
+                logger.info("✅ Arquivo .xls lido com sucesso usando xlrd")
+            except Exception as e1:
+                logger.warning(f"xlrd falhou: {str(e1)}")
+                error_messages.append(f"xlrd: {str(e1)}")
+                
+                # Tenta openpyxl como fallback
+                try:
+                    df = pd.read_excel(file_path, engine='openpyxl')
+                    logger.info("✅ Arquivo .xls lido com sucesso usando openpyxl (fallback)")
+                except Exception as e2:
+                    logger.warning(f"openpyxl também falhou: {str(e2)}")
+                    error_messages.append(f"openpyxl: {str(e2)}")
+                
+                # Tenta sem engine específica
+                if df is None:
+                    try:
+                        df = pd.read_excel(file_path)
+                        logger.info("✅ Arquivo .xls lido sem engine específica")
+                    except Exception as e3:
+                        error_messages.append(f"default: {str(e3)}")
+        
+        elif file_ext == 'xlsx':
+            # Para .xlsx, tenta openpyxl primeiro
+            try:
+                df = pd.read_excel(file_path, engine='openpyxl')
+                logger.info("✅ Arquivo .xlsx lido com sucesso usando openpyxl")
+            except Exception as e1:
+                logger.warning(f"openpyxl falhou: {str(e1)}")
+                error_messages.append(f"openpyxl: {str(e1)}")
+                
+                # Tenta xlrd como fallback
+                try:
+                    df = pd.read_excel(file_path, engine='xlrd')
+                    logger.info("✅ Arquivo .xlsx lido com sucesso usando xlrd (fallback)")
+                except Exception as e2:
+                    logger.warning(f"xlrd também falhou: {str(e2)}")
+                    error_messages.append(f"xlrd: {str(e2)}")
+                
+                # Tenta sem engine específica
+                if df is None:
+                    try:
+                        df = pd.read_excel(file_path)
+                        logger.info("✅ Arquivo .xlsx lido sem engine específica")
+                    except Exception as e3:
+                        error_messages.append(f"default: {str(e3)}")
+        
+        # Se ainda não conseguiu e tem assinatura Excel, tenta tratamento especial
+        if df is None and is_valid_excel:
+            logger.warning("Arquivo tem assinatura Excel mas não foi possível ler. Tentando tratamento especial...")
+            # Tenta remover BOM se existir e ler novamente
+            try:
+                with open(file_path, 'rb') as f:
+                    content = f.read()
+                
+                # Remove BOM se existir no início
+                if content.startswith(b'\xef\xbb\xbf'):
+                    logger.info("Removendo BOM do arquivo...")
+                    content = content[3:]
+                    temp_path = file_path + '_no_bom.xls'
+                    with open(temp_path, 'wb') as f:
+                        f.write(content)
+                    
+                    try:
+                        df = pd.read_excel(temp_path, engine='xlrd')
+                        logger.info("✅ Arquivo lido após remover BOM")
+                    except:
+                        pass
+                    finally:
+                        try:
+                            os.unlink(temp_path)
+                        except:
+                            pass
+            except Exception as e:
+                logger.warning(f"Tratamento especial falhou: {str(e)}")
+    
+    # PRIORIDADE 2: Se detectou HTML (mesmo que tenha extensão .xls/.xlsx), tenta converter HTML PRIMEIRO
+    if is_html:
+        logger.warning("Conteúdo HTML detectado, tentando converter HTML para DataFrame...")
+        
+        # Estratégia 1: Remove BOM primeiro e tenta pd.read_html
+        try:
+            with open(file_path, 'rb') as f:
+                content_bytes = f.read()
+            
+            # Remove BOM se existir
+            if content_bytes.startswith(b'\xef\xbb\xbf'):
+                logger.info("Removendo BOM do arquivo HTML...")
+                content_bytes = content_bytes[3:]
+            
+            # Salva temporariamente sem BOM
+            temp_html_path = file_path + '_temp_clean.html'
+            with open(temp_html_path, 'wb') as f:
+                f.write(content_bytes)
+            
+            # Tenta ler HTML com diferentes encodings
+            encodings_to_try = ['utf-8', 'utf-8-sig', 'latin-1', 'iso-8859-1', 'cp1252']
+            for encoding in encodings_to_try:
+                try:
+                    df_html = pd.read_html(temp_html_path, encoding=encoding)
+                    if df_html and len(df_html) > 0:
+                        # Pega a primeira tabela com mais colunas (geralmente é a principal)
+                        df = max(df_html, key=lambda x: len(x.columns) if not x.empty else 0)
+                        if not df.empty:
+                            logger.info(f"✅ HTML convertido com sucesso (encoding={encoding}): {len(df)} linhas, {len(df.columns)} colunas")
+                            break
+                except Exception as e1:
+                    if encoding == encodings_to_try[0]:
+                        logger.warning(f"pd.read_html com encoding {encoding} falhou: {str(e1)}")
+                        error_messages.append(f"read_html({str(e1)})")
+                    continue
+            
+            # Remove arquivo temporário
+            try:
+                os.unlink(temp_html_path)
+            except:
+                pass
+                
+        except Exception as e:
+            logger.warning(f"Erro ao processar HTML: {str(e)}")
+            error_messages.append(f"process_html: {str(e)}")
+        
+        # Estratégia 2: Se ainda não conseguiu, tenta direto no arquivo original
+        if df is None:
+            encodings_to_try = ['utf-8', 'utf-8-sig', 'latin-1', 'iso-8859-1', 'cp1252']
+            for encoding in encodings_to_try:
+                try:
+                    df_html = pd.read_html(file_path, encoding=encoding)
+                    if df_html and len(df_html) > 0:
+                        df = max(df_html, key=lambda x: len(x.columns) if not x.empty else 0)
+                        if not df.empty:
+                            logger.info(f"✅ HTML convertido diretamente (encoding={encoding}): {len(df)} linhas, {len(df.columns)} colunas")
+                            break
+                except Exception as e1:
+                    continue
+        
+        # Estratégia 2: Remove BOM manualmente e tenta novamente
+        if df is None:
+            try:
+                with open(file_path, 'rb') as f:
+                    content_bytes = f.read()
+                
+                # Remove BOM se existir
+                if content_bytes.startswith(b'\xef\xbb\xbf'):
+                    content_bytes = content_bytes[3:]
+                
+                # Salva temporariamente sem BOM
+                temp_html_path = file_path + '_clean.html'
+                with open(temp_html_path, 'wb') as f:
+                    f.write(content_bytes)
+                
+                df_html = pd.read_html(temp_html_path, encoding='utf-8')
+                if df_html and len(df_html) > 0:
+                    df = max(df_html, key=lambda x: len(x.columns) if not x.empty else 0)
+                    if not df.empty:
+                        logger.info(f"HTML convertido após remover BOM: {len(df)} linhas, {len(df.columns)} colunas")
+                
+                # Remove arquivo temporário
+                try:
+                    os.unlink(temp_html_path)
+                except:
+                    pass
+            except Exception as e2:
+                logger.warning(f"Conversão HTML com BOM removido falhou: {str(e2)}")
+                error_messages.append(f"read_html_bom({str(e2)})")
+        
+        # Estratégia 3: Tenta ler como CSV (às vezes HTML é salvo como CSV)
+        if df is None:
+            try:
+                for sep in [';', ',', '\t']:
+                    try:
+                        df_test = pd.read_csv(file_path, sep=sep, encoding='utf-8-sig', skiprows=0)
+                        if len(df_test.columns) > 1:  # Se encontrou múltiplas colunas
+                            df = df_test
+                            logger.info(f"HTML lido como CSV com separador '{sep}': {len(df)} linhas, {len(df.columns)} colunas")
+                            break
+                    except:
+                        continue
+            except Exception as e4:
+                logger.warning(f"Leitura como CSV falhou: {str(e4)}")
+    
+    # PRIORIDADE 3: Se não é HTML e tem extensão .xls/.xlsx mas não tem assinatura válida, tenta ler como Excel
+    if df is None and not is_html and file_ext in ['xls', 'xlsx']:
+        logger.info("Tentando ler como Excel (extensão .xls/.xlsx mas sem assinatura detectada)...")
         if file_ext == 'xls':
             try:
                 df = pd.read_excel(file_path, engine='xlrd')
-                logger.info("Arquivo .xls lido com xlrd")
+                logger.info("✅ Arquivo .xls lido com sucesso usando xlrd")
             except Exception as e1:
                 logger.warning(f"xlrd falhou: {str(e1)}")
+                error_messages.append(f"xlrd: {str(e1)}")
                 try:
                     df = pd.read_excel(file_path, engine='openpyxl')
-                    logger.info("Arquivo .xls lido com openpyxl (fallback)")
+                    logger.info("✅ Arquivo .xls lido com sucesso usando openpyxl")
                 except Exception as e2:
-                    error_messages.append(f"xlrd({str(e1)}), openpyxl({str(e2)})")
+                    error_messages.append(f"openpyxl: {str(e2)}")
         elif file_ext == 'xlsx':
             try:
                 df = pd.read_excel(file_path, engine='openpyxl')
-                logger.info("Arquivo .xlsx lido com openpyxl")
+                logger.info("✅ Arquivo .xlsx lido com sucesso usando openpyxl")
             except Exception as e1:
                 logger.warning(f"openpyxl falhou: {str(e1)}")
+                error_messages.append(f"openpyxl: {str(e1)}")
                 try:
                     df = pd.read_excel(file_path, engine='xlrd')
-                    logger.info("Arquivo .xlsx lido com xlrd (fallback)")
+                    logger.info("✅ Arquivo .xlsx lido com sucesso usando xlrd")
                 except Exception as e2:
-                    error_messages.append(f"openpyxl({str(e1)}), xlrd({str(e2)})")
-        
-        # Última tentativa sem engine específica
-        if df is None:
-            try:
-                df = pd.read_excel(file_path)
-                logger.info("Arquivo lido sem engine específica")
-            except Exception as e3:
-                error_messages.append(f"default({str(e3)})")
+                    error_messages.append(f"xlrd: {str(e2)}")
     
+    # Se ainda não conseguiu ler, dá mensagem de erro clara
     if df is None:
-        all_errors = ", ".join(error_messages) if error_messages else "Erro desconhecido"
-        raise ValueError(f"Não foi possível ler o arquivo Excel. Erros: {all_errors}")
+        if is_html:
+            raise ValueError(
+                "O arquivo parece ser HTML (página web) e não um arquivo Excel válido. "
+                "Por favor, abra o arquivo no Excel e salve como '.xlsx' ou '.xls' antes de enviar. "
+                f"Erros de conversão: {', '.join(error_messages) if error_messages else 'Não foi possível converter HTML'}"
+            )
+        elif is_valid_excel:
+            all_errors = ", ".join(error_messages) if error_messages else "Erro desconhecido"
+            raise ValueError(
+                f"O arquivo tem assinatura Excel válida mas não foi possível ler. "
+                f"O arquivo pode estar corrompido. Erros: {all_errors}. "
+                f"Tente abrir o arquivo no Excel e salvar novamente."
+            )
+        else:
+            all_errors = ", ".join(error_messages) if error_messages else "Erro desconhecido"
+            raise ValueError(
+                f"Não foi possível ler o arquivo Excel. "
+                f"Verifique se o arquivo não está corrompido. Erros: {all_errors}. "
+                f"Se o problema persistir, tente abrir o arquivo no Excel e salvar novamente como .xlsx"
+            )
     
     if df.empty:
-        raise ValueError("O arquivo está vazio")
+        raise ValueError("O arquivo está vazio ou não contém dados válidos")
     
     return df
 
@@ -320,7 +747,7 @@ def processar():
     
     if not allowed_file(file.filename):
         logger.error(f"Formato de arquivo inválido: {file.filename}")
-        flash('Formato de arquivo inválido. Envie apenas arquivos Excel (.xlsx, .xls)', 'error')
+        flash('Formato de arquivo inválido. Envie arquivos Excel (.xlsx, .xls) ou CSV (.csv)', 'error')
         return redirect(url_for('index'))
     
     try:
@@ -337,13 +764,31 @@ def processar():
             
             # Limpeza dos dados
             df = df.fillna("")
-            df.columns = df.columns.str.strip()
+            # Remove aspas e espaços extras dos nomes das colunas
+            df.columns = df.columns.str.strip().str.replace('"', '').str.replace("'", "")
             
             logger.info(f"Arquivo lido: {len(df)} linhas, {len(df.columns)} colunas")
-            logger.info(f"Colunas encontradas: {list(df.columns)}")
+            logger.info(f"Colunas encontradas (após limpeza): {list(df.columns)[:15]}")
             
-            # Valida estrutura
-            validar_planilha(df)
+            # Normaliza nomes das colunas (aceita variações como acentos, "do", etc)
+            df = normalizar_colunas_df(df)
+            
+            logger.info(f"Colunas após normalização: {list(df.columns)[:15]}")
+            
+            # Valida estrutura (apenas informa, não bloqueia - NUNCA bloqueia)
+            try:
+                validar_planilha(df)
+            except Exception as e:
+                # Se por algum motivo der erro na validação, apenas loga e continua
+                logger.warning(f"Validação retornou erro (mas continuando): {str(e)}")
+            
+            # Verifica se tem pelo menos algumas colunas básicas
+            colunas_basicas = ['Nome do negócio', 'Empresa', 'Fase', 'Responsavel']
+            tem_colunas_basicas = any(col in df.columns for col in colunas_basicas)
+            
+            if not tem_colunas_basicas:
+                logger.warning("Nenhuma coluna básica encontrada, mas continuando processamento...")
+                flash('Aviso: Algumas colunas esperadas não foram encontradas. O sistema continuará processando com os dados disponíveis.', 'warning')
             
             # Processa cada linha
             relatorio_final = []
@@ -352,32 +797,51 @@ def processar():
 
             for index, linha in df.iterrows():
                 try:
-                    # Monta o dicionário de dados da linha
+                    # Monta o dicionário de dados da linha (usa valores padrão se coluna não existir)
+                    # Busca colunas de forma flexível
+                    def buscar_coluna(coluna_principal, alternativas=None):
+                        """Busca coluna no DataFrame, tentando variações"""
+                        # Tenta coluna principal
+                        if coluna_principal in df.columns:
+                            valor = linha.get(coluna_principal, '')
+                            if pd.notna(valor):
+                                return str(valor).strip()
+                        
+                        # Tenta alternativas
+                        if alternativas:
+                            for alt in alternativas:
+                                if alt in df.columns:
+                                    valor = linha.get(alt, '')
+                                    if pd.notna(valor):
+                                        return str(valor).strip()
+                        return ''
+                    
                     item = {
-                        "negocio": str(linha.get('Nome do negócio', 'N/A')).strip(),
-                        "fase": str(linha.get('Fase', 'N/A')).strip(),
-                        "responsavel": str(linha.get('Responsavel', 'N/A')).strip(),
-                        "empresa": str(linha.get('Empresa', 'N/A')).strip(),
+                        "negocio": buscar_coluna('Nome do negócio', ['Nome do negocio', 'Negócio', 'Negocio']) or f'Negócio {index + 1}',
+                        "fase": buscar_coluna('Fase') or 'Não informada',
+                        "responsavel": buscar_coluna('Responsavel', ['Responsável', 'Vendedor', 'Usuario', 'Usuário']) or 'Não informado',
+                        "empresa": buscar_coluna('Empresa') or 'Não informada',
                         "historico_temperaturas": {
-                            "F1": str(linha.get('Temperatura da Proposta Follow 1', '')).strip(),
-                            "F2": str(linha.get('Temperatura da Proposta Follow 2', '')).strip(),
-                            "F3": str(linha.get('Temperatura da Proposta Follow 3', '')).strip(),
-                            "F4": str(linha.get('Temperatura da Proposta Follow 4', '')).strip(),
-                            "F5": str(linha.get('Temperatura da Proposta Follow 5', '')).strip(),
+                            "F1": buscar_coluna('Temperatura da Proposta Follow 1', ['Temperatura Follow 1', 'Temperatura 1']),
+                            "F2": buscar_coluna('Temperatura da Proposta Follow 2', ['Temperatura Follow 2', 'Temperatura 2']),
+                            "F3": buscar_coluna('Temperatura da Proposta Follow 3', ['Temperatura Follow 3', 'Temperatura 3']),
+                            "F4": buscar_coluna('Temperatura da Proposta Follow 4', ['Temperatura Follow 4', 'Temperatura 4']),
+                            "F5": buscar_coluna('Temperatura da Proposta Follow 5', ['Temperatura Follow 5', 'Temperatura 5']),
                         },
                         "historico_descricoes": {
-                            "D1": str(linha.get('Descrição Follow up 1', '')).strip(),
-                            "D2": str(linha.get('Descrição Follow up 2', '')).strip(),
-                            "D3": str(linha.get('Descrição Follow up 3', '')).strip(),
-                            "D4": str(linha.get('Descrição Follow up 4', '')).strip(),
-                            "D5": str(linha.get('Descrição Follow up 5', '')).strip(),
+                            "D1": buscar_coluna('Descrição Follow up 1', ['Descrição do Follow up 1', 'Descricao Follow up 1', 'Follow up 1']),
+                            "D2": buscar_coluna('Descrição Follow up 2', ['Descrição do Follow up 2', 'Descricao Follow up 2', 'Follow up 2']),
+                            "D3": buscar_coluna('Descrição Follow up 3', ['Descrição do Follow up 3', 'Descricao Follow up 3', 'Follow up 3']),
+                            "D4": buscar_coluna('Descrição Follow up 4', ['Descrição do Follow up 4', 'Descricao Follow up 4', 'Follow up 4']),
+                            "D5": buscar_coluna('Descrição Follow up 5', ['Descrição do Follow up 5', 'Descricao Follow up 5', 'Follow up 5']),
                         }
                     }
                     
-                    # Pula linhas completamente vazias
-                    if (item['negocio'] == 'N/A' and item['empresa'] == 'N/A' and 
-                        item['historico_descricoes']['D1'] == ''):
-                        logger.info(f"Pulando linha {index + 1} - dados vazios")
+                    # Pula linhas completamente vazias (mas é mais flexível agora)
+                    if (not item['negocio'] or item['negocio'] == f'Negócio {index + 1}') and \
+                       (not item['empresa'] or item['empresa'] == 'Não informada') and \
+                       not any(item['historico_descricoes'].values()):
+                        logger.info(f"Pulando linha {index + 1} - dados completamente vazios")
                         continue
                     
                     # Identifica follow-ups para exibição
@@ -432,9 +896,18 @@ def processar():
                 pass
 
     except ValueError as e:
-        logger.error(f"Erro de validação: {str(e)}")
-        flash(f'Erro na validação da planilha: {str(e)}', 'error')
-        return redirect(url_for('index'))
+        # Só bloqueia se for erro crítico (não relacionado a validação de colunas)
+        error_msg = str(e)
+        if "Colunas obrigatórias" in error_msg or "colunas faltando" in error_msg.lower():
+            # Se for erro de colunas, apenas avisa mas continua
+            logger.warning(f"Aviso de validação (continuando processamento): {error_msg}")
+            flash(f'Aviso: {error_msg}. O sistema continuará processando com os dados disponíveis.', 'warning')
+            # NÃO retorna redirect - continua processamento
+        else:
+            # Outros erros ValueError são críticos
+            logger.error(f"Erro crítico: {error_msg}")
+            flash(f'Erro ao processar arquivo: {error_msg}', 'error')
+            return redirect(url_for('index'))
     except Exception as e:
         logger.error(f"Erro crítico ao processar a planilha: {str(e)}")
         flash(f'Erro ao processar arquivo: {str(e)}', 'error')
