@@ -47,7 +47,7 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
 RETRY_DELAY = int(os.getenv('RETRY_DELAY', '5'))
-REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '2'))
+REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '10'))
 
 # Cache para evitar requisições duplicadas
 cache_analises = {}
