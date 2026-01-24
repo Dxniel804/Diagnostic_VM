@@ -10,7 +10,7 @@
 <body>
     <div class="container upload-container">
         <div class="upload-card">
-            <div class="upload-icon">📈</div>
+            <div class="upload-icon"></div>
             
             <h1 class="upload-title">Automação de Follow-up</h1>
             <p class="upload-subtitle">Suba sua planilha e deixe a IA definir a próxima estratégia de venda.</p>
@@ -32,15 +32,15 @@
                 
                 <div class="additional-info">
                     <div class="info-item">
-                        <span class="info-label">📊 Total de Negócios:</span>
+                        <span class="info-label">Total de Negócios:</span>
                         <span class="info-value">{{ total }}</span>
                     </div>
                     <div class="info-item">
-                        <span class="info-label">🤖 Análises Geradas:</span>
+                        <span class="info-label">Análises Geradas:</span>
                         <span class="info-value">IA Groq</span>
                     </div>
                     <div class="info-item">
-                        <span class="info-label">📅 Data do Processamento:</span>
+                        <span class="info-label">Data do Processamento:</span>
                         <span class="info-value">{{ moment().format('DD/MM/YYYY HH:mm') if moment else 'Agora' }}</span>
                     </div>
                     <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(74, 157, 106, 0.2); text-align: center;">
@@ -48,7 +48,7 @@
                             🔄 Processar Nova Planilha
                         </a>
                         <a href="{{ url_for('limpar_sessao') }}" class="btn-secondary" style="background: var(--vm-gray-600);">
-                            🧹 Limpar Sessão
+                            Limpar Sessão
                         </a>
                     </div>
                 </div>

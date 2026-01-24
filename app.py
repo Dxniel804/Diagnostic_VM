@@ -14,11 +14,15 @@ from dotenv import load_dotenv
 import tempfile
 from werkzeug.utils import secure_filename
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from datetime import datetime
+
+# Cores da Vendamais
+VM_GREEN = colors.HexColor('#006400')  # Verde escuro
+VM_ORANGE = colors.HexColor('#FF8C00') # Laranja
 import io
 
 # Carrega variáveis de ambiente
@@ -970,84 +974,150 @@ def gerar_pdf():
         
         # Cria buffer em memória
         buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
         
         # Estilos
         styles = getSampleStyleSheet()
+        
+        # Estilo do Título Principal
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Heading1'],
-            fontSize=20,
+            fontSize=24,
             spaceAfter=30,
-            alignment=1,
-            textColor=colors.HexColor('#2c3e50')
+            alignment=1, # Center
+            textColor=VM_GREEN,
+            fontName='Helvetica-Bold'
         )
         
-        heading_style = ParagraphStyle(
-            'CustomHeading',
+        # Estilo para Nome do Negócio
+        business_style = ParagraphStyle(
+            'BusinessTitle',
             parent=styles['Heading2'],
-            fontSize=14,
-            spaceAfter=12,
-            textColor=colors.HexColor('#34495e')
+            fontSize=16,
+            spaceAfter=10,
+            spaceBefore=20,
+            textColor=VM_ORANGE,
+            fontName='Helvetica-Bold',
+            borderPadding=5,
+            borderColor=VM_GREEN,
+            borderWidth=0,
+            backColor=colors.Color(0.95, 0.95, 0.95) # Fundo cinza claro
         )
         
+        # Estilo para Subtítulos (Diagnóstico, Estratégia, etc)
+        section_header_style = ParagraphStyle(
+            'SectionHeader',
+            parent=styles['Heading3'],
+            fontSize=12,
+            spaceAfter=6,
+            spaceBefore=12,
+            textColor=VM_GREEN,
+            fontName='Helvetica-Bold'
+        )
+        
+        # Estilo Normal
         normal_style = ParagraphStyle(
             'CustomNormal',
             parent=styles['Normal'],
             fontSize=10,
             spaceAfter=6,
-            leading=14
+            leading=14,
+            textColor=colors.HexColor('#2c3e50')
         )
         
+        # Estilo para Labels (Empresa, Responsável, etc)
+        label_style = ParagraphStyle(
+            'LabelStyle',
+            parent=styles['Normal'],
+            fontSize=10,
+            textColor=colors.HexColor('#7f8c8d'),
+            leading=14
+        )
+
         # Conteúdo do PDF
         story = []
         
         # Título
-        story.append(Paragraph("Relatório de Análise Estratégica de CRM", title_style))
-        story.append(Spacer(1, 20))
-        
-        # Data e resumo
-        data_atual = datetime.now().strftime("%d/%m/%Y %H:%M")
-        story.append(Paragraph(f"<b>Data:</b> {data_atual}", normal_style))
-        story.append(Paragraph(f"<b>Total de Negócios Analisados:</b> {total}", normal_style))
-        story.append(Spacer(1, 20))
+        story.append(Paragraph("Relatório de Análise Estratégica", title_style))
+        story.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}", 
+                             ParagraphStyle('Date', parent=normal_style, alignment=1, textColor=colors.gray)))
+        story.append(Spacer(1, 30))
         
         # Análises detalhadas
         for i, item in enumerate(relatorio_final, 1):
+            # Container para manter o bloco junto se possível
+            elements = []
+            
             # Cabeçalho do Cliente
-            story.append(Paragraph(f"<b>{i}. {item['negocio']}</b>", heading_style))
-            story.append(Paragraph(f"<b>Empresa:</b> {item['empresa']}", normal_style))
-            story.append(Paragraph(f"<b>Responsável:</b> {item['responsavel']}", normal_style))
+            elements.append(Paragraph(f"{i}. {item['negocio']}", business_style))
             
-            # Status Atual
-            story.append(Paragraph(f"<b>Fase:</b> {item['fase']}", normal_style))
-            story.append(Paragraph(f"<b>Temperatura Atual:</b> {item.get('temperatura_atual', 'Não informada')}", normal_style))
+            # Dados principais em tabela para organização
+            data = [
+                [Paragraph(f"<b>Empresa:</b> {item['empresa']}", normal_style),
+                 Paragraph(f"<b>Responsável:</b> {item['responsavel']}", normal_style)],
+                [Paragraph(f"<b>Fase:</b> {item['fase']}", normal_style),
+                 Paragraph(f"<b>Temperatura:</b> {item.get('temperatura_atual', 'Não informada')}", normal_style)],
+                [Paragraph(f"<b>Último Follow-up:</b> #{item.get('ultimo_follow', 0)}", normal_style),
+                 Paragraph(f"<b>Próximo Passo:</b> #{item.get('proximo_follow', 1)}", normal_style)]
+            ]
             
-            # Follow-up
-            ultimo = item.get('ultimo_follow', 0)
-            proximo = item.get('proximo_follow', 1)
-            if ultimo > 0:
-                story.append(Paragraph(f"<b>Último Follow-up Realizado:</b> #{ultimo}", normal_style))
-            story.append(Paragraph(f"<b>Próximo Follow-up:</b> #{proximo}", normal_style))
-            story.append(Spacer(1, 10))
+            t = Table(data, colWidths=[3.5*inch, 3.5*inch])
+            t.setStyle(TableStyle([
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('TOPPADDING', (0,0), (-1,-1), 2),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ]))
+            elements.append(t)
+            elements.append(Spacer(1, 10))
             
-            # Plano de Ação (IA)
-            story.append(Paragraph("<b>Plano de Ação Estratégico (IA):</b>", normal_style))
-            analise_text = item.get('analise_proximo_passo', 'Análise não disponível')
-            # Limita tamanho para não quebrar o PDF
-            if len(analise_text) > 1500:
-                analise_text = analise_text[:1500] + '...'
-            story.append(Paragraph(analise_text, normal_style))
-            story.append(Spacer(1, 20))
+            # Processamento da Análise da IA
+            analise_text = item.get('analise_proximo_passo', '')
             
-            # Quebra de página entre empresas (exceto na última)
+            # Remove os marcadores de markdown ** se existirem
+            analise_text = analise_text.replace('**DIAGNÓSTICO DA SITUAÇÃO:**', 'DIAGNÓSTICO DA SITUAÇÃO')
+            analise_text = analise_text.replace('**ESTRATÉGIA PARA O PRÓXIMO PASSO:**', 'ESTRATÉGIA PARA O PRÓXIMO PASSO')
+            analise_text = analise_text.replace('**AÇÃO RECOMENDADA:**', 'AÇÃO RECOMENDADA')
+            
+            # Divide o texto em linhas para processar
+            lines = analise_text.split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Verifica se é um cabeçalho de seção
+                if 'DIAGNÓSTICO DA SITUAÇÃO' in line:
+                    elements.append(Paragraph("🔍 DIAGNÓSTICO DA SITUAÇÃO", section_header_style))
+                elif 'ESTRATÉGIA PARA O PRÓXIMO PASSO' in line:
+                    elements.append(Paragraph("🎯 ESTRATÉGIA PARA O PRÓXIMO PASSO", section_header_style))
+                elif 'AÇÃO RECOMENDADA' in line:
+                    elements.append(Paragraph("🚀 AÇÃO RECOMENDADA", section_header_style))
+                else:
+                    # Remove asteriscos de markdown se sobrarem
+                    clean_line = line.replace('**', '').strip()
+                    if clean_line.startswith('-'):
+                        # Item de lista
+                        elements.append(Paragraph(f"• {clean_line[1:].strip()}", normal_style))
+                    else:
+                        elements.append(Paragraph(clean_line, normal_style))
+            
+            elements.append(Spacer(1, 20))
+            
+            # Adiciona ao story (tenta manter junto)
+            story.append(KeepTogether(elements))
+            
+            # Linha divisória
             if i < total:
-                story.append(PageBreak())
+                story.append(Spacer(1, 10))
+                story.append(Paragraph("_" * 60, ParagraphStyle('Line', parent=normal_style, alignment=1, textColor=colors.lightgrey)))
+                story.append(Spacer(1, 20))
         
         # Rodapé
-        story.append(Spacer(1, 20))
-        story.append(Paragraph("<b>Relatório gerado por:</b> Sistema de Automação de Vendas com IA", normal_style))
-        story.append(Paragraph(f"<b>Emissão:</b> {data_atual}", normal_style))
+        story.append(Spacer(1, 30))
+        story.append(Paragraph("Relatório gerado por Sistema de Automação de Vendas", 
+                             ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
         
         # Gera o PDF
         doc.build(story)
@@ -1056,7 +1126,7 @@ def gerar_pdf():
         # Prepara resposta
         response = make_response(buffer.getvalue())
         response.headers['Content-Type'] = 'application/pdf'
-        response.headers['Content-Disposition'] = f'inline; filename=relatorio_analise_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
+        response.headers['Content-Disposition'] = f'inline; filename=relatorio_estrategico_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
         
         logger.info(f"PDF gerado com sucesso: {total} itens")
         return response
