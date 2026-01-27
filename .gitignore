@@ -54,6 +54,9 @@ instance/
 uploads/
 temp/
 
+# Cache
+cache/
+
 # Excel files (for privacy)
 *.xlsx
 *.xls

@@ -18,7 +18,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
+import pickle
 
 # Cores da Vendamais
 VM_GREEN = colors.HexColor('#006400')  # Verde escuro
@@ -30,10 +32,77 @@ load_dotenv()
 
 # ==================== CONFIGURAÇÃO ====================
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', os.urandom(24).hex())
+app.secret_key = os.getenv('SECRET_KEY', 'diagnostic_vm_secret_key_2024_persistent')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
+app.config['SESSION_PERMANENT'] = True
+app.config['SESSION_USE_SIGNER'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
 
 ALLOWED_EXTENSIONS = {'xlsx', 'xls', 'csv'}
+
+# Cache em arquivo para relatórios (solução para problema de sessão)
+CACHE_DIR = 'cache'
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+
+def salvar_relatorio_cache(relatorio_data, relatorio_id):
+    """Salva relatório em cache de arquivo"""
+    try:
+        cache_file = os.path.join(CACHE_DIR, f'relatorio_{relatorio_id}.pkl')
+        with open(cache_file, 'wb') as f:
+            pickle.dump({
+                'data': relatorio_data,
+                'timestamp': datetime.now(),
+                'id': relatorio_id
+            }, f)
+        logger.info(f"Relatório salvo em cache: {cache_file}")
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao salvar relatório em cache: {str(e)}")
+        return False
+
+def carregar_relatorio_cache(relatorio_id):
+    """Carrega relatório do cache de arquivo"""
+    try:
+        cache_file = os.path.join(CACHE_DIR, f'relatorio_{relatorio_id}.pkl')
+        if os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+            
+            # Verifica se o cache não é muito antigo (24 horas)
+            if datetime.now() - cache_data['timestamp'] < timedelta(hours=24):
+                logger.info(f"Relatório carregado do cache: {cache_file}")
+                return cache_data['data']
+            else:
+                # Remove cache antigo
+                os.unlink(cache_file)
+                logger.info(f"Cache antigo removido: {cache_file}")
+        return None
+    except Exception as e:
+        logger.error(f"Erro ao carregar relatório do cache: {str(e)}")
+        return None
+
+def limpar_cache_antigo():
+    """Remove caches antigos (mais de 24 horas)"""
+    try:
+        agora = datetime.now()
+        for filename in os.listdir(CACHE_DIR):
+            if filename.startswith('relatorio_') and filename.endswith('.pkl'):
+                cache_file = os.path.join(CACHE_DIR, filename)
+                try:
+                    with open(cache_file, 'rb') as f:
+                        cache_data = pickle.load(f)
+                    if agora - cache_data['timestamp'] > timedelta(hours=24):
+                        os.unlink(cache_file)
+                        logger.info(f"Cache antigo removido: {filename}")
+                except:
+                    # Se não conseguir ler, remove o arquivo
+                    try:
+                        os.unlink(cache_file)
+                    except:
+                        pass
+    except Exception as e:
+        logger.error(f"Erro ao limpar cache antigo: {str(e)}")
 
 # Configuração de logging
 logging.basicConfig(
@@ -875,11 +944,10 @@ def processar():
                         }
                     }
                     
-                    # Pula linhas completamente vazias (mas é mais flexível agora)
+                    # Pula linhas completamente vazias (apenas se não tiver nome do negócio E empresa)
                     if (not item['negocio'] or item['negocio'] == f'Negócio {index + 1}') and \
-                       (not item['empresa'] or item['empresa'] == 'Não informada') and \
-                       not any(item['historico_descricoes'].values()):
-                        logger.info(f"Pulando linha {index + 1} - dados completamente vazios")
+                       (not item['empresa'] or item['empresa'] == 'Não informada'):
+                        logger.info(f"Pulando linha {index + 1} - sem dados básicos (negócio/empresa)")
                         continue
                     
                     # Identifica follow-ups para exibição
@@ -888,11 +956,33 @@ def processar():
                     item["proximo_follow"] = proximo_follow
                     item["temperatura_atual"] = temperatura_atual
                     
-                    # Chama a IA para análise estratégica
-                    item["analise_proximo_passo"] = pedir_estrategia_ia(item)
+                    # Chama a IA para análise estratégica (sem bloqueio)
+                    try:
+                        item["analise_proximo_passo"] = pedir_estrategia_ia(item)
+                    except Exception as e:
+                        logger.warning(f"Erro na IA para {item['negocio']}: {str(e)}")
+                        # Análise simples baseada nos dados disponíveis
+                        temp_atual = item.get('temperatura_atual', 'Não informada')
+                        fase = item.get('fase', 'Não informada')
+                        
+                        item["analise_proximo_passo"] = f"""DIAGNÓSTICO DA SITUAÇÃO:
+- Temperatura Atual: {temp_atual}
+- Fase Atual: {fase}
+- Empresa: {item['empresa']}
+- Responsável: {item['responsavel']}
+
+ESTRATÉGIA PARA O PRÓXIMO PASSO:
+- Manter contato regular com o cliente
+- Apresentar propostas comerciais alinhadas ao estágio atual
+- Focar nos benefícios da solução Vendamais
+
+AÇÃO RECOMENDADA:
+- Próximo contato em 2-3 dias úteis
+- Enviar material informativo sobre a solução
+- Agendar reunião de demonstração"""
                     
-                    # Pausa para não sobrecarregar a API
-                    time.sleep(REQUEST_DELAY)
+                    # Sem pausa para processar mais rápido
+                    # time.sleep(2)  # Comentado para acelerar
                     
                     relatorio_final.append(item)
                     linhas_processadas += 1
@@ -912,17 +1002,24 @@ def processar():
                 flash('Nenhuma linha válida encontrada na planilha', 'warning')
                 return redirect(url_for('index'))
             
-            # Armazena na sessão
+            # Armazena na sessão e no cache
             import uuid
             relatorio_id = str(uuid.uuid4())[:8]
             
+            # Salva no cache de arquivo
+            salvar_relatorio_cache(relatorio_final, relatorio_id)
+            
+            # Mantém na sessão como backup (mas não depende apenas disso)
             if 'relatorios' not in session:
                 session['relatorios'] = {}
-            session['relatorios'][relatorio_id] = relatorio_final
+            session['relatorios'][relatorio_id] = relatorio_id  # Apenas o ID
             session['relatorio_id_atual'] = relatorio_id
-            session['relatorio_data'] = relatorio_final
+            session['relatorio_data'] = relatorio_final[:5]  # Apenas alguns itens como backup
             
             logger.info(f"Relatório armazenado com ID: {relatorio_id}")
+            
+            # Limpa caches antigos
+            limpar_cache_antigo()
             
             return render_template('relatorio.html', relatorio=relatorio_final, total=len(relatorio_final))
             
@@ -958,14 +1055,53 @@ def gerar_pdf():
     try:
         relatorio_final = None
         
-        if 'relatorio_data' in session and session['relatorio_data']:
-            relatorio_final = session['relatorio_data']
-        elif 'relatorios' in session and session['relatorios']:
+        # Debug: Log session contents
+        logger.info(f"Session keys: {list(session.keys())}")
+        
+        # Tenta carregar do cache de arquivo primeiro (prioridade máxima)
+        if 'relatorio_id_atual' in session:
+            relatorio_id = session['relatorio_id_atual']
+            relatorio_final = carregar_relatorio_cache(relatorio_id)
+            if relatorio_final:
+                logger.info(f"Relatório carregado do cache de arquivo: {len(relatorio_final)} itens")
+        
+        # Se não encontrou pelo ID atual, tenta outros métodos
+        if not relatorio_final and 'relatorios' in session and session['relatorios']:
+            # Tenta o último ID da sessão (fallback)
             ultimo_id = list(session['relatorios'].keys())[-1]
-            relatorio_final = session['relatorios'][ultimo_id]
+            if isinstance(session['relatorios'][ultimo_id], str):
+                # Se for string, é um ID de cache
+                relatorio_final = carregar_relatorio_cache(session['relatorios'][ultimo_id])
+            else:
+                # Se for lista diretamente (modo antigo)
+                relatorio_final = session['relatorios'][ultimo_id]
+            
+            if relatorio_final:
+                logger.info(f"Usando relatorios da sessão: {len(relatorio_final)} itens")
+        
+        # Se ainda não encontrou, tenta obter da sessão (apenas como último recurso)
+        if not relatorio_final and 'relatorio_data' in session and session['relatorio_data']:
+            relatorio_final = session['relatorio_data']
+            logger.warning(f"Usando relatorio_data limitado da sessão: {len(relatorio_final)} itens (backup apenas)")
+        
+        # Se ainda não encontrou, tenta encontrar o cache mais recente
+        if not relatorio_final:
+            try:
+                cache_files = [f for f in os.listdir(CACHE_DIR) if f.startswith('relatorio_') and f.endswith('.pkl')]
+                if cache_files:
+                    # Pega o arquivo mais recente
+                    cache_files.sort(key=lambda x: os.path.getmtime(os.path.join(CACHE_DIR, x)), reverse=True)
+                    latest_cache = cache_files[0]
+                    relatorio_id = latest_cache.replace('relatorio_', '').replace('.pkl', '')
+                    relatorio_final = carregar_relatorio_cache(relatorio_id)
+                    if relatorio_final:
+                        logger.info(f"Usando cache mais recente encontrado: {relatorio_id}")
+            except Exception as e:
+                logger.warning(f"Erro ao buscar cache mais recente: {str(e)}")
         
         if not relatorio_final:
-            logger.error("Dados do relatório não encontrados na sessão")
+            logger.error("Dados do relatório não encontrados na sessão nem no cache")
+            logger.error(f"Session data: {dict(session)}")
             flash('Dados do relatório não encontrados. Por favor, processe a planilha novamente.', 'error')
             return redirect(url_for('index'))
         
@@ -1135,6 +1271,19 @@ def gerar_pdf():
         logger.error(f"Erro ao gerar PDF: {str(e)}")
         flash(f'Erro ao gerar PDF: {str(e)}', 'error')
         return redirect(url_for('index'))
+
+
+@app.route('/debug_session')
+def debug_session():
+    """Debug route to check session status"""
+    session_info = {
+        'keys': list(session.keys()),
+        'relatorio_data_exists': 'relatorio_data' in session,
+        'relatorios_exists': 'relatorios' in session,
+        'relatorio_data_length': len(session.get('relatorio_data', [])) if 'relatorio_data' in session else 0,
+        'relatorios_count': len(session.get('relatorios', {})) if 'relatorios' in session else 0,
+    }
+    return session_info
 
 
 @app.route('/limpar_sessao')
