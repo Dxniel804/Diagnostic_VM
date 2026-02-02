@@ -45,7 +45,28 @@
             </div>
         </div>
 
-        <!-- Cards de cada Negócio -->
+        <!-- Seção de Responsáveis -->
+        {% if responsaveis %}
+        <div class="responsaveis-section">
+            <h2>📊 Análises por Responsável</h2>
+            <p>Clique em um Responsável para visualizar suas análises individuais:</p>
+            <div class="responsaveis-grid">
+                {% for responsavel in responsaveis %}
+                <a href="{{ url_for('ver_responsavel', responsavel=responsavel) }}" class="responsavel-card">
+                    <div class="responsavel-avatar">👤</div>
+                    <div class="responsavel-info">
+                        <h3>{{ responsavel }}</h3>
+                        <p>{{ relatorio_agrupado[responsavel]|length }} negócio(s)</p>
+                    </div>
+                    <div class="responsavel-arrow">→</div>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Cards de cada Negócio (OCULTO - apenas mostrar se não houver responsáveis) -->
+        {% if not responsaveis %}
         {% for item in relatorio %}
         <div class="negocio-card">
             <!-- Cabeçalho do Negócio -->
@@ -110,16 +131,23 @@
             </div>
         </div>
         {% endfor %}
+        {% endif %}
     </div>
 
     <!-- Botões de Ação Flutuantes -->
     <div class="action-buttons">
+        {% if responsaveis %}
+        <a href="{{ url_for('index') }}" class="btn-action btn-secondary-action">
+            Nova Análise
+        </a>
+        {% else %}
         <a href="{{ url_for('gerar_pdf') }}" class="btn-action" target="_blank">
             Baixar PDF
         </a>
         <a href="{{ url_for('index') }}" class="btn-action btn-secondary-action">
             Voltar
         </a>
+        {% endif %}
     </div>
     <script>
         document.addEventListener('DOMContentLoaded', function () {

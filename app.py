@@ -38,6 +38,19 @@ app.config['SESSION_PERMANENT'] = True
 app.config['SESSION_USE_SIGNER'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
 
+# Custom Jinja2 tests and filters
+@app.template_test('contains')
+def contains_test(value, search_term):
+    """Check if value contains search term (case-insensitive)"""
+    if value is None:
+        return False
+    return search_term.lower() in str(value).lower()
+
+@app.template_filter('default_if_none')
+def default_if_none_filter(value, default):
+    """Return default value if value is None"""
+    return default if value is None else value
+
 ALLOWED_EXTENSIONS = {'xlsx', 'xls', 'csv'}
 
 # Cache em arquivo para relatórios (solução para problema de sessão)
@@ -120,7 +133,7 @@ GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
 RETRY_DELAY = int(os.getenv('RETRY_DELAY', '5'))
-REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '10'))
+REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '2'))  # Reduzido de 10 para 2 segundos
 
 # Cache para evitar requisições duplicadas
 cache_analises = {}
@@ -886,7 +899,8 @@ def processar():
                 logger.warning("Nenhuma coluna básica encontrada, mas continuando processamento...")
                 flash('Aviso: Algumas colunas esperadas não foram encontradas. O sistema continuará processando com os dados disponíveis.', 'warning')
             
-            # Processa cada linha
+            # Agrupa dados por Responsável
+            relatorio_agrupado = {}
             relatorio_final = []
             linhas_processadas = 0
             linhas_com_erro = 0
@@ -959,6 +973,8 @@ def processar():
                     # Chama a IA para análise estratégica (sem bloqueio)
                     try:
                         item["analise_proximo_passo"] = pedir_estrategia_ia(item)
+                        # Pequeno delay para evitar erro 429 da API
+                        time.sleep(1)  # 1 segundo entre requisições
                     except Exception as e:
                         logger.warning(f"Erro na IA para {item['negocio']}: {str(e)}")
                         # Análise simples baseada nos dados disponíveis
@@ -987,6 +1003,12 @@ AÇÃO RECOMENDADA:
                     relatorio_final.append(item)
                     linhas_processadas += 1
                     
+                    # Adiciona ao agrupamento por Responsável
+                    responsavel = item['responsavel'] or 'Não informado'
+                    if responsavel not in relatorio_agrupado:
+                        relatorio_agrupado[responsavel] = []
+                    relatorio_agrupado[responsavel].append(item)
+                    
                     # Progress log
                     if (index + 1) % 10 == 0:
                         logger.info(f"Progresso: {index + 1}/{len(df)} linhas processadas")
@@ -997,6 +1019,7 @@ AÇÃO RECOMENDADA:
                     continue
 
             logger.info(f"Processamento concluído: {linhas_processadas} sucessos, {linhas_com_erro} erros")
+            logger.info(f"Responsáveis identificados: {list(relatorio_agrupado.keys())}")
             
             if linhas_processadas == 0:
                 flash('Nenhuma linha válida encontrada na planilha', 'warning')
@@ -1006,22 +1029,29 @@ AÇÃO RECOMENDADA:
             import uuid
             relatorio_id = str(uuid.uuid4())[:8]
             
-            # Salva no cache de arquivo
-            salvar_relatorio_cache(relatorio_final, relatorio_id)
+            # Salva no cache de arquivo (agora com dados agrupados)
+            dados_cache = {
+                'relatorio_final': relatorio_final,
+                'relatorio_agrupado': relatorio_agrupado,
+                'responsaveis': list(relatorio_agrupado.keys())
+            }
+            salvar_relatorio_cache(dados_cache, relatorio_id)
             
             # Mantém na sessão como backup (mas não depende apenas disso)
             if 'relatorios' not in session:
                 session['relatorios'] = {}
             session['relatorios'][relatorio_id] = relatorio_id  # Apenas o ID
             session['relatorio_id_atual'] = relatorio_id
-            session['relatorio_data'] = relatorio_final[:5]  # Apenas alguns itens como backup
+            session['relatorio_data'] = dados_cache  # Salva os dados completos como backup
+            session.permanent = True  # Garante que a sessão persista
             
             logger.info(f"Relatório armazenado com ID: {relatorio_id}")
             
             # Limpa caches antigos
             limpar_cache_antigo()
             
-            return render_template('relatorio.html', relatorio=relatorio_final, total=len(relatorio_final))
+            return render_template('relatorio.html', relatorio=relatorio_final, total=len(relatorio_final), 
+                           relatorio_agrupado=relatorio_agrupado, responsaveis=list(relatorio_agrupado.keys()))
             
         finally:
             # Remove arquivo temporário
@@ -1046,6 +1076,387 @@ AÇÃO RECOMENDADA:
     except Exception as e:
         logger.error(f"Erro crítico ao processar a planilha: {str(e)}")
         flash(f'Erro ao processar arquivo: {str(e)}', 'error')
+        return redirect(url_for('index'))
+
+
+@app.route('/responsavel/<responsavel>')
+def ver_responsavel(responsavel):
+    """Visualização individual de análises por Responsável"""
+    try:
+        # Debug: Log session state
+        logger.info(f"Session keys at start: {list(session.keys())}")
+        logger.info(f"Requested responsável: '{responsavel}'")
+        
+        # Carrega dados do cache
+        relatorio_final = None
+        relatorio_agrupado = None
+        
+        # Tenta 1: Cache de arquivo
+        if 'relatorio_id_atual' in session:
+            relatorio_id = session['relatorio_id_atual']
+            logger.info(f"Found relatorio_id_atual in session: {relatorio_id}")
+            dados_cache = carregar_relatorio_cache(relatorio_id)
+            if dados_cache:
+                logger.info(f"Cache loaded successfully, type: {type(dados_cache)}")
+                # Verifica se é o formato novo (com dicionário) ou antigo (lista direta)
+                if isinstance(dados_cache, dict):
+                    relatorio_final = dados_cache.get('relatorio_final', [])
+                    relatorio_agrupado = dados_cache.get('relatorio_agrupado', {})
+                    logger.info(f"Using new cache format - found {len(relatorio_agrupado)} responsáveis")
+                else:
+                    # Formato antigo - converte para novo
+                    relatorio_final = dados_cache
+                    relatorio_agrupado = {}
+                    # Agrupa por responsável
+                    for item in relatorio_final:
+                        responsavel_item = item.get('responsavel', 'Não informado')
+                        if responsavel_item not in relatorio_agrupado:
+                            relatorio_agrupado[responsavel_item] = []
+                        relatorio_agrupado[responsavel_item].append(item)
+                    logger.info(f"Converted old cache format - found {len(relatorio_agrupado)} responsáveis")
+            else:
+                logger.warning(f"Failed to load cache for ID: {relatorio_id}")
+        else:
+            logger.warning("relatorio_id_atual not found in session")
+        
+        # Tenta 2: Sessão (backup)
+        if not relatorio_agrupado and 'relatorio_data' in session:
+            logger.info("Trying backup session data")
+            dados_session = session['relatorio_data']
+            if isinstance(dados_session, dict):
+                relatorio_final = dados_session.get('relatorio_final', [])
+                relatorio_agrupado = dados_session.get('relatorio_agrupado', {})
+                logger.info(f"Using session backup - found {len(relatorio_agrupado)} responsáveis")
+            else:
+                # Formato antigo na sessão
+                relatorio_final = dados_session
+                relatorio_agrupado = {}
+                for item in relatorio_final:
+                    responsavel_item = item.get('responsavel', 'Não informado')
+                    if responsavel_item not in relatorio_agrupado:
+                        relatorio_agrupado[responsavel_item] = []
+                    relatorio_agrupado[responsavel_item].append(item)
+                logger.info(f"Converted session backup - found {len(relatorio_agrupado)} responsáveis")
+        
+        # Tenta 3: Busca automática no cache se não encontrou nada
+        if not relatorio_agrupado:
+            logger.info("Trying auto-discovery in cache files")
+            try:
+                for filename in os.listdir(CACHE_DIR):
+                    if filename.startswith('relatorio_') and filename.endswith('.pkl'):
+                        cache_file = os.path.join(CACHE_DIR, filename)
+                        try:
+                            with open(cache_file, 'rb') as f:
+                                cache_data = pickle.load(f)
+                            
+                            # Verifica se o cache não é muito antigo (24 horas)
+                            if datetime.now() - cache_data['timestamp'] < timedelta(hours=24):
+                                dados_cache = cache_data['data']
+                                if isinstance(dados_cache, dict) and 'relatorio_agrupado' in dados_cache:
+                                    relatorio_agrupado = dados_cache['relatorio_agrupado']
+                                    relatorio_final = dados_cache.get('relatorio_final', [])
+                                    logger.info(f"Auto-discovered cache with {len(relatorio_agrupado)} responsáveis")
+                                    break
+                        except Exception as e:
+                            logger.warning(f"Failed to read cache file {filename}: {e}")
+                            continue
+            except Exception as e:
+                logger.error(f"Error in auto-discovery: {e}")
+        
+        # Debug: Log do que foi encontrado
+        logger.info(f"Final result - Cache: {bool(relatorio_agrupado)}, Session: {bool('relatorio_data' in session)}")
+        if relatorio_agrupado:
+            logger.info(f"Responsáveis disponíveis: {list(relatorio_agrupado.keys())}")
+            logger.info(f"Responsável solicitado: '{responsavel}'")
+        
+        if not relatorio_agrupado:
+            logger.error("Dados agrupados não encontrados em nenhum lugar")
+            flash('Dados não encontrados. Por favor, processe a planilha novamente.', 'error')
+            return redirect(url_for('index'))
+        
+        # Busca dados do responsável específico
+        dados_responsavel = relatorio_agrupado.get(responsavel, [])
+        
+        if not dados_responsavel:
+            logger.warning(f"Responsável '{responsavel}' não encontrado nos dados")
+            logger.info(f"Available responsáveis: {list(relatorio_agrupado.keys())}")
+            flash(f'Responsável "{responsavel}" não encontrado nos dados.', 'warning')
+            return redirect(url_for('index'))
+        
+        logger.info(f"Exibindo {len(dados_responsavel)} itens para o responsável: {responsavel}")
+        
+        return render_template('responsavel.html', 
+                             relatorio=dados_responsavel, 
+                             total=len(dados_responsavel),
+                             responsavel=responsavel,
+                             todos_responsaveis=list(relatorio_agrupado.keys()))
+        
+    except Exception as e:
+        logger.error(f"Erro ao visualizar responsável: {str(e)}")
+        flash(f'Erro ao carregar dados do responsável: {str(e)}', 'error')
+        return redirect(url_for('index'))
+
+
+@app.route('/gerar_pdf_responsavel/<responsavel>')
+def gerar_pdf_responsavel(responsavel):
+    """Gera PDF individual para um Responsável específico"""
+    try:
+        logger.info(f"Generating PDF for responsável: '{responsavel}'")
+        
+        # Carrega dados do cache (usando a mesma lógica de auto-discovery)
+        relatorio_agrupado = None
+        relatorio_final = None
+        
+        # Tenta 1: Cache de arquivo
+        if 'relatorio_id_atual' in session:
+            relatorio_id = session['relatorio_id_atual']
+            logger.info(f"Found relatorio_id_atual in session: {relatorio_id}")
+            dados_cache = carregar_relatorio_cache(relatorio_id)
+            if dados_cache:
+                logger.info(f"Cache loaded successfully for PDF")
+                # Verifica se é o formato novo (com dicionário) ou antigo (lista direta)
+                if isinstance(dados_cache, dict):
+                    relatorio_agrupado = dados_cache.get('relatorio_agrupado', {})
+                    relatorio_final = dados_cache.get('relatorio_final', [])
+                else:
+                    # Formato antigo - agrupa por responsável
+                    relatorio_final = dados_cache
+                    relatorio_agrupado = {}
+                    for item in relatorio_final:
+                        responsavel_item = item.get('responsavel', 'Não informado')
+                        if responsavel_item not in relatorio_agrupado:
+                            relatorio_agrupado[responsavel_item] = []
+                        relatorio_agrupado[responsavel_item].append(item)
+            else:
+                logger.warning(f"Failed to load cache for PDF with ID: {relatorio_id}")
+        else:
+            logger.warning("relatorio_id_atual not found in session for PDF")
+        
+        # Tenta 2: Sessão (backup)
+        if not relatorio_agrupado and 'relatorio_data' in session:
+            logger.info("Trying backup session data for PDF")
+            dados_session = session['relatorio_data']
+            if isinstance(dados_session, dict):
+                relatorio_agrupado = dados_session.get('relatorio_agrupado', {})
+                relatorio_final = dados_session.get('relatorio_final', [])
+            else:
+                # Formato antigo na sessão
+                relatorio_final = dados_session
+                relatorio_agrupado = {}
+                for item in relatorio_final:
+                    responsavel_item = item.get('responsavel', 'Não informado')
+                    if responsavel_item not in relatorio_agrupado:
+                        relatorio_agrupado[responsavel_item] = []
+                    relatorio_agrupado[responsavel_item].append(item)
+        
+        # Tenta 3: Busca automática no cache se não encontrou nada
+        if not relatorio_agrupado:
+            logger.info("Trying auto-discovery in cache files for PDF")
+            try:
+                for filename in os.listdir(CACHE_DIR):
+                    if filename.startswith('relatorio_') and filename.endswith('.pkl'):
+                        cache_file = os.path.join(CACHE_DIR, filename)
+                        try:
+                            with open(cache_file, 'rb') as f:
+                                cache_data = pickle.load(f)
+                            
+                            # Verifica se o cache não é muito antigo (24 horas)
+                            if datetime.now() - cache_data['timestamp'] < timedelta(hours=24):
+                                dados_cache = cache_data['data']
+                                if isinstance(dados_cache, dict) and 'relatorio_agrupado' in dados_cache:
+                                    relatorio_agrupado = dados_cache['relatorio_agrupado']
+                                    relatorio_final = dados_cache.get('relatorio_final', [])
+                                    logger.info(f"Auto-discovered cache for PDF with {len(relatorio_agrupado)} responsáveis")
+                                    break
+                        except Exception as e:
+                            logger.warning(f"Failed to read cache file {filename} for PDF: {e}")
+                            continue
+            except Exception as e:
+                logger.error(f"Error in auto-discovery for PDF: {e}")
+        
+        if not relatorio_agrupado:
+            logger.error("Dados agrupados não encontrados para PDF")
+            flash('Dados não encontrados. Por favor, processe a planilha novamente.', 'error')
+            return redirect(url_for('index'))
+        
+        # Busca dados do responsável específico
+        dados_responsavel = relatorio_agrupado.get(responsavel, [])
+        
+        if not dados_responsavel:
+            logger.warning(f"Responsável '{responsavel}' não encontrado para PDF")
+            logger.info(f"Available responsáveis for PDF: {list(relatorio_agrupado.keys())}")
+            flash(f'Responsável "{responsavel}" não encontrado nos dados.', 'warning')
+            return redirect(url_for('processar'))
+        
+        total = len(dados_responsavel)
+        logger.info(f"Gerando PDF individual para {responsavel}: {total} itens")
+        
+        # Cria buffer em memória
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
+        
+        # Estilos
+        styles = getSampleStyleSheet()
+        
+        # Estilo do Título Principal
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            spaceAfter=30,
+            alignment=1, # Center
+            textColor=VM_GREEN,
+            fontName='Helvetica-Bold'
+        )
+        
+        # Estilo para Nome do Negócio
+        business_style = ParagraphStyle(
+            'BusinessTitle',
+            parent=styles['Heading2'],
+            fontSize=16,
+            spaceAfter=10,
+            spaceBefore=20,
+            textColor=VM_ORANGE,
+            fontName='Helvetica-Bold',
+            borderPadding=5,
+            borderColor=VM_GREEN,
+            borderWidth=0,
+            backColor=colors.Color(0.95, 0.95, 0.95) # Fundo cinza claro
+        )
+        
+        # Estilo para Subtítulos (Diagnóstico, Estratégia, etc)
+        section_header_style = ParagraphStyle(
+            'SectionHeader',
+            parent=styles['Heading3'],
+            fontSize=12,
+            spaceAfter=6,
+            spaceBefore=12,
+            textColor=VM_GREEN,
+            fontName='Helvetica-Bold'
+        )
+        
+        # Estilo Normal
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontSize=10,
+            spaceAfter=6,
+            leading=14,
+            textColor=colors.HexColor('#2c3e50')
+        )
+        
+        # Estilo para Labels (Empresa, Responsável, etc)
+        label_style = ParagraphStyle(
+            'LabelStyle',
+            parent=styles['Normal'],
+            fontSize=10,
+            textColor=colors.HexColor('#7f8c8d'),
+            leading=14
+        )
+
+        # Conteúdo do PDF
+        story = []
+        
+        # Título
+        story.append(Paragraph(f"Relatório Individual - {responsavel}", title_style))
+        story.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}", 
+                             ParagraphStyle('Date', parent=normal_style, alignment=1, textColor=colors.gray)))
+        story.append(Paragraph(f"Total de Negócios: {total}", 
+                             ParagraphStyle('Total', parent=normal_style, alignment=1, textColor=colors.gray)))
+        story.append(Spacer(1, 30))
+        
+        # Análises detalhadas
+        for i, item in enumerate(dados_responsavel, 1):
+            # Container para manter o bloco junto se possível
+            elements = []
+            
+            # Cabeçalho do Cliente
+            elements.append(Paragraph(f"{i}. {item['negocio']}", business_style))
+            
+            # Dados principais em tabela para organização
+            data = [
+                [Paragraph(f"<b>Empresa:</b> {item['empresa']}", normal_style),
+                 Paragraph(f"<b>Fase:</b> {item['fase']}", normal_style)],
+                [Paragraph(f"<b>Temperatura:</b> {item.get('temperatura_atual', 'Não informada')}", normal_style),
+                 Paragraph(f"<b>Último Follow-up:</b> #{item.get('ultimo_follow', 0)}", normal_style)],
+                [Paragraph(f"<b>Próximo Passo:</b> #{item.get('proximo_follow', 1)}", normal_style),
+                 Paragraph("", normal_style)]
+            ]
+            
+            t = Table(data, colWidths=[3.5*inch, 3.5*inch])
+            t.setStyle(TableStyle([
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('TOPPADDING', (0,0), (-1,-1), 2),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+            ]))
+            elements.append(t)
+            elements.append(Spacer(1, 10))
+            
+            # Processamento da Análise da IA
+            analise_text = item.get('analise_proximo_passo', '')
+            
+            # Remove os marcadores de markdown ** se existirem
+            analise_text = analise_text.replace('**DIAGNÓSTICO DA SITUAÇÃO:**', 'DIAGNÓSTICO DA SITUAÇÃO')
+            analise_text = analise_text.replace('**ESTRATÉGIA PARA O PRÓXIMO PASSO:**', 'ESTRATÉGIA PARA O PRÓXIMO PASSO')
+            analise_text = analise_text.replace('**AÇÃO RECOMENDADA:**', 'AÇÃO RECOMENDADA')
+            
+            # Divide o texto em linhas para processar
+            lines = analise_text.split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                # Verifica se é um cabeçalho de seção
+                if 'DIAGNÓSTICO DA SITUAÇÃO' in line:
+                    elements.append(Paragraph("🔍 DIAGNÓSTICO DA SITUAÇÃO", section_header_style))
+                elif 'ESTRATÉGIA PARA O PRÓXIMO PASSO' in line:
+                    elements.append(Paragraph("🎯 ESTRATÉGIA PARA O PRÓXIMO PASSO", section_header_style))
+                elif 'AÇÃO RECOMENDADA' in line:
+                    elements.append(Paragraph("🚀 AÇÃO RECOMENDADA", section_header_style))
+                else:
+                    # Remove asteriscos de markdown se sobrarem
+                    clean_line = line.replace('**', '').strip()
+                    if clean_line.startswith('-'):
+                        # Item de lista
+                        elements.append(Paragraph(f"• {clean_line[1:].strip()}", normal_style))
+                    else:
+                        elements.append(Paragraph(clean_line, normal_style))
+            
+            elements.append(Spacer(1, 20))
+            
+            # Adiciona ao story (tenta manter junto)
+            story.append(KeepTogether(elements))
+            
+            # Linha divisória
+            if i < total:
+                story.append(Spacer(1, 10))
+                story.append(Paragraph("_" * 60, ParagraphStyle('Line', parent=normal_style, alignment=1, textColor=colors.lightgrey)))
+                story.append(Spacer(1, 20))
+        
+        # Rodapé
+        story.append(Spacer(1, 30))
+        story.append(Paragraph(f"Relatório individual gerado para: {responsavel}", 
+                             ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
+        story.append(Paragraph("Relatório gerado por Sistema de Automação de Vendas", 
+                             ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
+        
+        # Gera o PDF
+        doc.build(story)
+        buffer.seek(0)
+        
+        # Prepara resposta
+        response = make_response(buffer.getvalue())
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'inline; filename=relatorio_{responsavel.replace(" ", "_")}_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
+        
+        logger.info(f"PDF individual gerado com sucesso para {responsavel}: {total} itens")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erro ao gerar PDF individual: {str(e)}")
+        flash(f'Erro ao gerar PDF individual: {str(e)}', 'error')
         return redirect(url_for('index'))
 
 
