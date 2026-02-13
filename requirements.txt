@@ -11,3 +11,4 @@ reportlab==4.2.0
 lxml>=5.0.0
 html5lib==1.1
 gunicorn==21.2.0
+PyPDF2==3.0.1

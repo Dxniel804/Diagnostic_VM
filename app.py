@@ -21,6 +21,9 @@ from reportlab.lib import colors
 from datetime import datetime, timedelta
 import json
 import pickle
+from PyPDF2 import PdfReader
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Cores da Vendamais
 VM_GREEN = colors.HexColor('#006400')  # Verde escuro
@@ -49,7 +52,7 @@ def contains_test(value, search_term):
 @app.template_filter('default_if_none')
 def default_if_none_filter(value, default):
     """Return default value if value is None"""
-    return default if value is None else value
+    return default if value is None else value  
 
 ALLOWED_EXTENSIONS = {'xlsx', 'xls', 'csv'}
 
@@ -132,11 +135,57 @@ logger = logging.getLogger(__name__)
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
-RETRY_DELAY = int(os.getenv('RETRY_DELAY', '5'))
-REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '2'))  # Reduzido de 10 para 2 segundos
+RETRY_DELAY = int(os.getenv('RETRY_DELAY', '1'))  # Reduzido para 1 segundo
+REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '0.5'))  # Reduzido para 0.5 segundos para maior velocidade
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', '4'))  # Número de threads paralelas
 
 # Cache para evitar requisições duplicadas
 cache_analises = {}
+
+# Knowledge Base da empresa
+KNOWLEDGE_BASE_DIR = 'knowledge_base'
+knowledge_base_text = ""
+
+def carregar_knowledge_base():
+    """Carrega e processa todos os PDFs da pasta knowledge_base"""
+    global knowledge_base_text
+    knowledge_base_text = ""
+    
+    if not os.path.exists(KNOWLEDGE_BASE_DIR):
+        logger.info(f"Pasta knowledge_base não encontrada. Criando pasta...")
+        os.makedirs(KNOWLEDGE_BASE_DIR)
+        return
+    
+    pdf_files = [f for f in os.listdir(KNOWLEDGE_BASE_DIR) if f.lower().endswith('.pdf')]
+    
+    if not pdf_files:
+        logger.info("Nenhum PDF encontrado na pasta knowledge_base")
+        return
+    
+    logger.info(f"Carregando {len(pdf_files)} PDFs da knowledge base...")
+    
+    for pdf_file in pdf_files:
+        try:
+            pdf_path = os.path.join(KNOWLEDGE_BASE_DIR, pdf_file)
+            with open(pdf_path, 'rb') as file:
+                pdf_reader = PdfReader(file)
+                text_content = ""
+                
+                for page in pdf_reader.pages:
+                    text_content += page.extract_text() + "\n"
+                
+                knowledge_base_text += f"\n=== CONTEÚDO DO ARQUIVO: {pdf_file} ===\n"
+                knowledge_base_text += text_content + "\n"
+                
+                logger.info(f"PDF carregado: {pdf_file} ({len(pdf_reader.pages)} páginas)")
+                
+        except Exception as e:
+            logger.error(f"Erro ao ler PDF {pdf_file}: {str(e)}")
+    
+    if knowledge_base_text:
+        logger.info(f"Knowledge base carregada com sucesso ({len(knowledge_base_text)} caracteres)")
+    else:
+        logger.warning("Nenhum conteúdo pôde ser extraído dos PDFs")
 
 if not GROQ_API_KEY:
     logger.error("GROQ_API_KEY não encontrada nas variáveis de ambiente")
@@ -149,6 +198,9 @@ try:
 except Exception as e:
     logger.error(f"Erro ao configurar cliente Groq: {str(e)}")
     raise ValueError("Não foi possível configurar o cliente Groq. Verifique sua API key.")
+
+# Carrega a knowledge base da empresa ao iniciar
+carregar_knowledge_base()
 
 
 # ==================== FUNÇÕES AUXILIARES ====================
@@ -165,6 +217,48 @@ def gerar_hash_cache(dados_negocio):
         dados_str += f"|{dados_negocio['historico_descricoes'][f'D{i}']}"
         dados_str += f"|{dados_negocio['historico_temperaturas'][f'F{i}']}"
     return hashlib.md5(dados_str.encode()).hexdigest()
+
+
+def processar_item_thread(item_data):
+    """
+    Processa um único item em thread separada para análise paralela
+    """
+    try:
+        # Identifica follow-ups para exibição
+        ultimo_follow, proximo_follow, temperatura_atual = identificar_ultimo_followup(item_data)
+        item_data["ultimo_follow"] = ultimo_follow
+        item_data["proximo_follow"] = proximo_follow
+        item_data["temperatura_atual"] = temperatura_atual
+        
+        # Chama a IA para análise estratégica
+        logger.info(f"Analisando negócio em paralelo: {item_data['negocio']}")
+        item_data["analise_proximo_passo"] = pedir_estrategia_ia(item_data)
+        
+        return item_data, None  # Sucesso
+        
+    except Exception as e:
+        logger.warning(f"Erro na IA para {item_data['negocio']}: {str(e)}")
+        # Análise simples baseada nos dados disponíveis
+        temp_atual = item_data.get('temperatura_atual', 'Não informada')
+        fase = item_data.get('fase', 'Não informada')
+        
+        item_data["analise_proximo_passo"] = f"""DIAGNÓSTICO DA SITUAÇÃO:
+- Temperatura Atual: {temp_atual}
+- Fase Atual: {fase}
+- Empresa: {item_data['empresa']}
+- Responsável: {item_data['responsavel']}
+
+ESTRATÉGIA PARA O PRÓXIMO PASSO:
+- Manter contato regular com o cliente
+- Apresentar propostas comerciais alinhadas ao estágio atual
+- Focar nos benefícios da solução Vendamais
+
+AÇÃO RECOMENDADA:
+- Próximo contato em 2-3 dias úteis
+- Enviar material informativo sobre a solução
+- Agendar reunião de demonstração"""
+        
+        return item_data, str(e)  # Erro mas com análise fallback
 
 
 def identificar_ultimo_followup(dados_negocio):
@@ -217,12 +311,25 @@ def pedir_estrategia_ia(dados_negocio):
         if desc:
             historico_texto += f"Follow-up {i} (Temperatura: {temp or 'Não informada'}): {desc}\n"
     
-    prompt = f"""Você é um Diretor Comercial experiente com anos de experiência em fechamento de vendas.
+    # Adiciona conhecimento da empresa se disponível
+    conhecimento_empresa = ""
+    if knowledge_base_text:
+        conhecimento_empresa = f"""
+CONHECIMENTO DA EMPRESA (VENDAMAIS):
+{knowledge_base_text[:3000]}  # Limita para não exceder o tamanho do prompt
+
+Use este conhecimento para alinhar as estratégias com os produtos, serviços e valores da Vendamais."""
+    else:
+        conhecimento_empresa = "NOTA: Nenhum documento da empresa disponível na knowledge base. Forneça estratégias genéricas de vendas."
+    
+    prompt = f"""Você é um Diretor Comercial experiente com anos de experiência em fechamento de vendas na Vendamais.
+
+{conhecimento_empresa}
 
 ANÁLISE DO NEGÓCIO:
 - Nome do Negócio: {dados_negocio['negocio']}
 - Empresa Cliente: {dados_negocio['empresa']}
-- Responsável: {dados_negocio['responsavel']}
+- Vendedor/Responsável: {dados_negocio['responsavel']}  # ESTE É QUEM VAI ENVIAR A MENSAGEM
 - Fase Atual: {dados_negocio['fase']}
 - Último Follow-up Realizado: #{ultimo_follow}
 - Próximo Follow-up a Realizar: #{proximo_follow}
@@ -231,8 +338,21 @@ ANÁLISE DO NEGÓCIO:
 HISTÓRICO DE CONVERSAS:
 {historico_texto if historico_texto else 'Nenhum follow-up realizado ainda.'}
 
+INSTRUÇÕES CRUCIAIS:
+1. O "{dados_negocio['responsavel']}" é O VENDEDOR/RESPONSÁVEL que vai ENVIAR a mensagem
+2. O cliente é alguém da "{dados_negocio['empresa']}" (NÃO use o nome do responsável como se fosse o cliente)
+3. NUNCA use o nome do responsável no vocativo ou como destinatário
+4. Use "[Nome do Cliente]" ou contatos da empresa como destinatário
+
+EXEMPLOS DE ESTRUTURA CORRETA:
+ERRADO: "Prezado Rafael, analisamos sua proposta..."
+CERTO: "Olá [Nome do Cliente], o Rafael aqui da Vendamais gostaria de saber..."
+
+ERRADO: "João, sobre sua proposta..."
+CERTO: "Olá [Nome do Cliente], o João aqui da Vendamais entra em contato..."
+
 SUA MISSÃO:
-Analise a situação e forneça uma orientação estratégica PRÁTICA e DIRETA para o Follow-up #{proximo_follow}.
+Analise a situação e forneça uma orientação estratégica PRÁTICA e DIRETA para o Follow-up #{proximo_follow} que o responsável "{dados_negocio['responsavel']}" vai realizar.
 
 A resposta DEVE conter exatamente estas 3 seções:
 
@@ -242,9 +362,10 @@ A resposta DEVE conter exatamente estas 3 seções:
    - Identifique objeções, pontos de atenção ou oportunidades
 
 2. **ESTRATÉGIA PARA O PRÓXIMO PASSO:**
-   - O que dizer exatamente no próximo contato (mensagem direta)
+   - O que dizer exatamente no próximo contato (mensagem direta para o CLIENTE)
    - Argumentos de fechamento específicos para esta situação
    - Gatilhos mentais ou técnicas de persuasão adequadas
+   - A mensagem deve ser do responsável "{dados_negocio['responsavel']}" para o cliente da "{dados_negocio['empresa']}"
 
 3. **AÇÃO RECOMENDADA:**
    - Pergunta de fechamento específica
@@ -312,6 +433,49 @@ Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
     return "Não foi possível gerar a análise para este item (limite de tentativas excedido)."
 
 
+def filtrar_negocios_por_fase(relatorio):
+    """
+    Filtra negócios para mostrar apenas a partir da Fase Proposta
+    Oculta: Oportunidade, Contato, Conectado e Reunião
+    Mostra: Proposta, Follow up 1, Follow up 2, Follow up 3, Follow up 4, Follow up 5, Negociação, etc.
+    """
+    fases_ocultar = ['oportunidade', 'contato', 'conectado', 'reunião']
+    
+    relatorio_filtrado = []
+    for item in relatorio:
+        fase_atual = item.get('fase', '').lower().strip()
+        
+        # Verifica se a fase atual não está na lista de fases a ocultar
+        # Se não tiver fase ou se for a partir de Proposta, inclui
+        if not fase_atual or not any(fase_oculta in fase_atual for fase_oculta in fases_ocultar):
+            relatorio_filtrado.append(item)
+    
+    # LOG DETALHADO para debug
+    logger.info(f"=== DEBUG DO FILTRO ===")
+    logger.info(f"Fases a ocultar: {fases_ocultar}")
+    logger.info(f"Total original: {len(relatorio)} itens")
+    
+    # Conta por fase
+    contagem_fases = {}
+    for item in relatorio:
+        fase = item.get('fase', 'Não informada')
+        contagem_fases[fase] = contagem_fases.get(fase, 0) + 1
+    
+    logger.info(f"Contagem por fase: {contagem_fases}")
+    logger.info(f"Total após filtro: {len(relatorio_filtrado)} itens")
+    
+    # Conta por responsável após filtro
+    contagem_responsaveis = {}
+    for item in relatorio_filtrado:
+        resp = item.get('responsavel', 'Não informado')
+        contagem_responsaveis[resp] = contagem_responsaveis.get(resp, 0) + 1
+    
+    logger.info(f"Responsáveis após filtro: {contagem_responsaveis}")
+    logger.info(f"=========================")
+    
+    return relatorio_filtrado
+
+
 def normalizar_nome_coluna(nome):
     """Normaliza nome de coluna removendo acentos, espaços extras, aspas e convertendo para minúsculas"""
     import unicodedata
@@ -372,6 +536,10 @@ def normalizar_colunas_df(df):
     """Normaliza nomes das colunas do DataFrame para nomes padrão"""
     mapeamento = {}
     
+    # LOG para debug das colunas encontradas
+    logger.info(f"=== DEBUG COLUNAS ===")
+    logger.info(f"Colunas originais: {list(df.columns)}")
+    
     # Mapeamento de colunas esperadas para variações possíveis
     colunas_esperadas = {
         'Nome do negócio': ['nome do negocio', 'nome do negócio', 'negocio', 'negócio'],
@@ -406,9 +574,34 @@ def normalizar_colunas_df(df):
     # Renomeia as colunas encontradas
     if mapeamento:
         df = df.rename(columns=mapeamento)
-        logger.info(f"Colunas normalizadas ({len(mapeamento)} colunas): {list(mapeamento.items())[:5]}")
+        logger.info(f"Colunas normalizadas ({len(mapeamento)} colunas): {list(mapeamento.items())}")
     else:
         logger.warning("Nenhuma coluna foi normalizada. Verifique se os nomes das colunas estão corretos.")
+    
+    # Se for CSV sem cabeçalho, mapeia por posição
+    if df.columns.tolist() == list(range(df.shape[1])):
+        logger.info("CSV sem cabeçalho detectado, mapeando por posição...")
+        mapeamento_posicional = {
+            0: 'Empresa',
+            2: 'Fase', 
+            3: 'Responsavel',
+            7: 'Descrição Follow up 1',
+            8: 'Descrição Follow up 2', 
+            9: 'Descrição Follow up 3',
+            10: 'Descrição Follow up 4',
+            11: 'Descrição Follow up 5',
+            12: 'Temperatura da Proposta Follow 1',
+            13: 'Temperatura da Proposta Follow 2',
+            14: 'Temperatura da Proposta Follow 3', 
+            15: 'Temperatura da Proposta Follow 4',
+            16: 'Temperatura da Proposta Follow 5',
+        }
+        
+        for pos, nome in mapeamento_posicional.items():
+            if pos < df.shape[1]:
+                df.rename(columns={pos: nome}, inplace=True)
+        
+        logger.info(f"Mapeamento posicional aplicado: {mapeamento_posicional}")
     
     # Cria colunas faltantes com valores vazios (para garantir que o sistema funcione)
     colunas_esperadas = [
@@ -428,6 +621,9 @@ def normalizar_colunas_df(df):
     
     if colunas_criadas:
         logger.info(f"Colunas criadas automaticamente (vazias): {', '.join(colunas_criadas)}")
+    
+    logger.info(f"Colunas finais: {list(df.columns)}")
+    logger.info(f"=====================")
     
     return df
 
@@ -839,6 +1035,109 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/todos')
+def ver_todos():
+    """Visualização de todos os negócios filtrados por fase (Proposta para frente)"""
+    try:
+        logger.info("=== ROTA /TOS INICIADA ===")
+        
+        # Carrega dados do cache
+        relatorio_final = None
+        relatorio_agrupado = None
+        
+        # Tenta 1: Cache de arquivo
+        if 'relatorio_id_atual' in session:
+            relatorio_id = session['relatorio_id_atual']
+            logger.info(f"Found relatorio_id_atual in session: {relatorio_id}")
+            dados_cache = carregar_relatorio_cache(relatorio_id)
+            if dados_cache:
+                if isinstance(dados_cache, dict):
+                    relatorio_final = dados_cache.get('relatorio_final', [])
+                    relatorio_agrupado = dados_cache.get('relatorio_agrupado', {})
+                    logger.info(f"Cache loaded: {len(relatorio_final)} itens, {len(relatorio_agrupado)} responsáveis")
+                else:
+                    # Formato antigo - converte para novo
+                    relatorio_final = dados_cache
+                    relatorio_agrupado = {}
+                    for item in relatorio_final:
+                        responsavel_item = item.get('responsavel', 'Não informado')
+                        if responsavel_item not in relatorio_agrupado:
+                            relatorio_agrupado[responsavel_item] = []
+                        relatorio_agrupado[responsavel_item].append(item)
+                    logger.info(f"Old format converted: {len(relatorio_agrupado)} responsáveis")
+            else:
+                logger.warning(f"Failed to load cache for ID: {relatorio_id}")
+        else:
+            logger.warning("relatorio_id_atual not found in session")
+        
+        # Tenta 2: Sessão (backup)
+        if not relatorio_agrupado and 'relatorio_data' in session:
+            logger.info("Trying backup session data")
+            dados_session = session['relatorio_data']
+            if isinstance(dados_session, dict):
+                relatorio_final = dados_session.get('relatorio_final', [])
+                relatorio_agrupado = dados_session.get('relatorio_agrupado', {})
+                logger.info(f"Session backup loaded: {len(relatorio_agrupado)} responsáveis")
+            else:
+                relatorio_final = dados_session
+                relatorio_agrupado = {}
+                for item in relatorio_final:
+                    responsavel_item = item.get('responsavel', 'Não informado')
+                    if responsavel_item not in relatorio_agrupado:
+                        relatorio_agrupado[responsavel_item] = []
+                    relatorio_agrupado[responsavel_item].append(item)
+                logger.info(f"Session backup converted: {len(relatorio_agrupado)} responsáveis")
+        
+        # Tenta 3: Busca automática no cache
+        if not relatorio_agrupado:
+            logger.info("Trying auto-discovery in cache files")
+            try:
+                for filename in os.listdir(CACHE_DIR):
+                    if filename.startswith('relatorio_') and filename.endswith('.pkl'):
+                        cache_file = os.path.join(CACHE_DIR, filename)
+                        try:
+                            with open(cache_file, 'rb') as f:
+                                cache_data = pickle.load(f)
+                            
+                            if datetime.now() - cache_data['timestamp'] < timedelta(hours=24):
+                                dados_cache = cache_data['data']
+                                if isinstance(dados_cache, dict) and 'relatorio_agrupado' in dados_cache:
+                                    relatorio_agrupado = dados_cache['relatorio_agrupado']
+                                    relatorio_final = dados_cache.get('relatorio_final', [])
+                                    logger.info(f"Auto-discovered: {len(relatorio_agrupado)} responsáveis")
+                                    break
+                        except Exception as e:
+                            logger.warning(f"Failed to read cache file {filename}: {e}")
+                            continue
+            except Exception as e:
+                logger.error(f"Error in auto-discovery: {e}")
+        
+        # Debug final
+        if relatorio_agrupado:
+            logger.info(f"Responsáveis encontrados: {list(relatorio_agrupado.keys())}")
+            for resp, itens in relatorio_agrupado.items():
+                logger.info(f"  - {resp}: {len(itens)} itens")
+        else:
+            logger.error("Nenhum dado encontrado em nenhum lugar!")
+        
+        if not relatorio_final:
+            flash('Dados não encontrados. Por favor, processe a planilha novamente.', 'error')
+            return redirect(url_for('index'))
+        
+        logger.info(f"=== RENDERIZANDO TEMPLATES COM {len(relatorio_agrupado)} RESPONSÁVEIS ===")
+        
+        return render_template('relatorio.html', 
+                             relatorio=relatorio_final, 
+                             total=len(relatorio_final),
+                             relatorio_agrupado=relatorio_agrupado, 
+                             responsaveis=list(relatorio_agrupado.keys()))
+        
+    except Exception as e:
+        logger.error(f"Erro ao visualizar todos os negócios: {str(e)}")
+        flash(f'Erro ao carregar dados: {str(e)}', 'error')
+        return redirect(url_for('index'))
+
+
 @app.route('/processar', methods=['POST'])
 def processar():
     """Processa a planilha enviada e gera análises estratégicas"""
@@ -905,6 +1204,9 @@ def processar():
             linhas_processadas = 0
             linhas_com_erro = 0
 
+            # Prepara todos os itens para processamento
+            itens_para_processar = []
+            
             for index, linha in df.iterrows():
                 try:
                     # Monta o dicionário de dados da linha (usa valores padrão se coluna não existir)
@@ -964,59 +1266,46 @@ def processar():
                         logger.info(f"Pulando linha {index + 1} - sem dados básicos (negócio/empresa)")
                         continue
                     
-                    # Identifica follow-ups para exibição
-                    ultimo_follow, proximo_follow, temperatura_atual = identificar_ultimo_followup(item)
-                    item["ultimo_follow"] = ultimo_follow
-                    item["proximo_follow"] = proximo_follow
-                    item["temperatura_atual"] = temperatura_atual
-                    
-                    # Chama a IA para análise estratégica (sem bloqueio)
-                    try:
-                        item["analise_proximo_passo"] = pedir_estrategia_ia(item)
-                        # Pequeno delay para evitar erro 429 da API
-                        time.sleep(1)  # 1 segundo entre requisições
-                    except Exception as e:
-                        logger.warning(f"Erro na IA para {item['negocio']}: {str(e)}")
-                        # Análise simples baseada nos dados disponíveis
-                        temp_atual = item.get('temperatura_atual', 'Não informada')
-                        fase = item.get('fase', 'Não informada')
-                        
-                        item["analise_proximo_passo"] = f"""DIAGNÓSTICO DA SITUAÇÃO:
-- Temperatura Atual: {temp_atual}
-- Fase Atual: {fase}
-- Empresa: {item['empresa']}
-- Responsável: {item['responsavel']}
-
-ESTRATÉGIA PARA O PRÓXIMO PASSO:
-- Manter contato regular com o cliente
-- Apresentar propostas comerciais alinhadas ao estágio atual
-- Focar nos benefícios da solução Vendamais
-
-AÇÃO RECOMENDADA:
-- Próximo contato em 2-3 dias úteis
-- Enviar material informativo sobre a solução
-- Agendar reunião de demonstração"""
-                    
-                    # Sem pausa para processar mais rápido
-                    # time.sleep(2)  # Comentado para acelerar
-                    
-                    relatorio_final.append(item)
-                    linhas_processadas += 1
-                    
-                    # Adiciona ao agrupamento por Responsável
-                    responsavel = item['responsavel'] or 'Não informado'
-                    if responsavel not in relatorio_agrupado:
-                        relatorio_agrupado[responsavel] = []
-                    relatorio_agrupado[responsavel].append(item)
-                    
-                    # Progress log
-                    if (index + 1) % 10 == 0:
-                        logger.info(f"Progresso: {index + 1}/{len(df)} linhas processadas")
+                    itens_para_processar.append(item)
                         
                 except Exception as e:
-                    logger.error(f"Erro ao processar linha {index + 1}: {str(e)}")
+                    logger.error(f"Erro ao preparar linha {index + 1}: {str(e)}")
                     linhas_com_erro += 1
                     continue
+
+            logger.info(f"Iniciando processamento paralelo de {len(itens_para_processar)} itens com {MAX_WORKERS} threads")
+            
+            # Processamento paralelo com ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                # Envia todos os itens para processamento paralelo
+                future_to_item = {executor.submit(processar_item_thread, item): item for item in itens_para_processar}
+                
+                # Coleta os resultados conforme ficam prontos
+                for future in as_completed(future_to_item):
+                    try:
+                        item_processado, erro = future.result()
+                        
+                        if erro:
+                            logger.warning(f"Item processado com erro: {erro}")
+                            linhas_com_erro += 1
+                        else:
+                            linhas_processadas += 1
+                        
+                        relatorio_final.append(item_processado)
+                        
+                        # Adiciona ao agrupamento por Responsável
+                        responsavel = item_processado['responsavel'] or 'Não informado'
+                        if responsavel not in relatorio_agrupado:
+                            relatorio_agrupado[responsavel] = []
+                        relatorio_agrupado[responsavel].append(item_processado)
+                        
+                        # Progress log
+                        if len(relatorio_final) % 5 == 0:
+                            logger.info(f"Progresso paralelo: {len(relatorio_final)}/{len(itens_para_processar)} itens concluídos")
+                        
+                    except Exception as e:
+                        logger.error(f"Erro ao processar resultado paralelo: {str(e)}")
+                        linhas_com_erro += 1
 
             logger.info(f"Processamento concluído: {linhas_processadas} sucessos, {linhas_com_erro} erros")
             logger.info(f"Responsáveis identificados: {list(relatorio_agrupado.keys())}")
@@ -1025,15 +1314,26 @@ AÇÃO RECOMENDADA:
                 flash('Nenhuma linha válida encontrada na planilha', 'warning')
                 return redirect(url_for('index'))
             
+            # Aplica filtro de fase - mostra apenas a partir da Fase Proposta
+            relatorio_final_filtrado = filtrar_negocios_por_fase(relatorio_final)
+            
+            # Reagrupa os dados filtrados por responsável
+            relatorio_agrupado_filtrado = {}
+            for item in relatorio_final_filtrado:
+                responsavel = item.get('responsavel', 'Não informado')
+                if responsavel not in relatorio_agrupado_filtrado:
+                    relatorio_agrupado_filtrado[responsavel] = []
+                relatorio_agrupado_filtrado[responsavel].append(item)
+            
             # Armazena na sessão e no cache
             import uuid
             relatorio_id = str(uuid.uuid4())[:8]
             
-            # Salva no cache de arquivo (agora com dados agrupados)
+            # Salva no cache de arquivo (agora com dados filtrados)
             dados_cache = {
-                'relatorio_final': relatorio_final,
-                'relatorio_agrupado': relatorio_agrupado,
-                'responsaveis': list(relatorio_agrupado.keys())
+                'relatorio_final': relatorio_final_filtrado,
+                'relatorio_agrupado': relatorio_agrupado_filtrado,
+                'responsaveis': list(relatorio_agrupado_filtrado.keys())
             }
             salvar_relatorio_cache(dados_cache, relatorio_id)
             
@@ -1050,8 +1350,8 @@ AÇÃO RECOMENDADA:
             # Limpa caches antigos
             limpar_cache_antigo()
             
-            return render_template('relatorio.html', relatorio=relatorio_final, total=len(relatorio_final), 
-                           relatorio_agrupado=relatorio_agrupado, responsaveis=list(relatorio_agrupado.keys()))
+            return render_template('relatorio.html', relatorio=relatorio_final_filtrado, total=len(relatorio_final_filtrado), 
+                           relatorio_agrupado=relatorio_agrupado_filtrado, responsaveis=list(relatorio_agrupado_filtrado.keys()))
             
         finally:
             # Remove arquivo temporário
