@@ -247,21 +247,9 @@ def processar_item_thread(item_data):
         temp_atual = item_data.get('temperatura_atual', 'Não informada')
         fase = item_data.get('fase', 'Não informada')
         
-        item_data["analise_proximo_passo"] = f"""DIAGNÓSTICO DA SITUAÇÃO:
-- Temperatura Atual: {temp_atual}
-- Fase Atual: {fase}
-- Empresa: {item_data['empresa']}
-- Responsável: {item_data['responsavel']}
-
-ESTRATÉGIA PARA O PRÓXIMO PASSO:
-- Manter contato regular com o cliente
-- Apresentar propostas comerciais alinhadas ao estágio atual
-- Focar nos benefícios da solução Vendamais
-
-AÇÃO RECOMENDADA:
-- Próximo contato em 2-3 dias úteis
-- Enviar material informativo sobre a solução
-- Agendar reunião de demonstração"""
+        item_data["analise_proximo_passo"] = f"""1. **SITUAÇÃO:** Cliente aguardando retorno em {fase}.
+2. **AÇÃO:** "Olá {item_data['empresa']}, passando para confirmar se recebeu minha proposta de {item_data['negocio']}."
+3. **META:** Confirmar recebimento e agendar breve alinhamento."""
         
         return item_data, str(e)  # Erro mas com análise fallback
 
@@ -302,7 +290,7 @@ def pedir_estrategia_ia(dados_negocio):
     # Identifica o hash para evitar requisições duplicadas
     hash_cache = gerar_hash_cache(dados_negocio)
     
-    # Busca cache desativada temporariamente para forçar a robustez da nova IA
+    # Busca cache desativada para garantir que as novas orientações curtas sejam aplicadas
     # if hash_cache in cache_analises:
     #     return cache_analises[hash_cache]
 
@@ -328,45 +316,24 @@ Use TODO o conteúdo técnico acima para embasar sua análise. Cite produtos, se
     else:
         conhecimento_empresa = "NOTA: Nenhum documento da empresa disponível. Use as melhores práticas mundiais de vendas B2B de alto ticket."
     
-    prompt = f"""Você é um Diretor Comercial Sênior da Vendamais, especialista em fechamentos de alta complexidade e mestre em persuasão. 
-
-Sua missão é dar uma aula de estratégia para o vendedor "{dados_negocio['responsavel']}" sobre como ganhar esse jogo. Sua análise deve ser ROBUSTA, PROFUNDA e ESTRATÉGICA. Não aceite o óbvio.
+    prompt = f"""Você é um Diretor Comercial Sênior da Vendamais. Dê uma orientação estratégica equilibrada para o vendedor "{dados_negocio['responsavel']}".
 
 {conhecimento_empresa}
 
-CONTEXTO DO NEGÓCIO:
-- Negócio: {dados_negocio['negocio']}
-- Cliente: {dados_negocio['empresa']} (Cargo do destinatário: [Nome do Cliente])
-- Responsável: {dados_negocio['responsavel']}
-- Fase Atual: {dados_negocio['fase']}
-- Próximo Passo: Follow-up #{proximo_follow}
-- Temperatura: {temperatura_atual}
+CONTEXTO:
+- Negócio/Cliente: {dados_negocio['negocio']} | {dados_negocio['empresa']}
+- Próximo Passo: Follow-up #{proximo_follow} (Temperatura: {temperatura_atual})
 
-HISTÓRICO COMPLETO:
-{historico_texto if historico_texto else 'Início de prospecção.'}
+HISTÓRICO: {historico_texto if historico_texto else 'Início de prospecção.'}
 
-ESTRUTURA DA SUA RESPOSTA (DETALHADA E SEM CORTES):
+ESTRUTURA DA RESPOSTA:
+1. **SITUAÇÃO:** Resuma em um parágrafo curto (3-4 frases) o cenário atual, o que o cliente está sentindo e o principal desafio.
+2. **MENSAGEM RECOMENDADA:** Crie uma mensagem persuasiva e profissional pronta para enviar. Use gatilhos mentais da Vendamais.
+3. **PRÓXIMO PASSO:** Defina a meta clara deste contato e como conduzir para o fechamento.
 
-1. **ANÁLISE DE CENÁRIO E PSICOLOGIA DO CLIENTE:**
-   - Faça um diagnóstico profundo do momento atual.
-   - O que o cliente está pensando agora? Quais as dores ocultas? 
-   - Identifique objetivamente o risco de perda ou a oportunidade de aceleração.
-   - Analise o comportamento no histórico (se ele esfriou, por que esfriou?).
+REGRA: Seja direto e profissional. Evite introduções desnecessárias, mas forneça substância estratégica em cada tópico."""
 
-2. **PLANO DE ATAQUE E ESTRATÉGIA DE COMUNICAÇÃO:**
-   - Crie uma mensagem de contato PRONTA para ser enviada, extremamente persuasiva.
-   - Use gatilhos mentais específicos (Escassez, Autoridade, Prova Social ou Reciprocidade).
-   - Indique exatamente o tom de voz: deve ser desafiador, consultivo ou focado em relacionamento?
-   - Explique o "PORQUÊ" dessa estratégia. Não apenas diga o que fazer, explique a lógica por trás.
-
-3. **GATILHOS DE FECHAMENTO E PRÓXIMOS PASSOS:**
-   - Qual a pergunta de "Xeque-Mate" para esse contato?
-   - Defina 3 cenários possíveis de resposta do cliente e como o vendedor deve reagir a cada um.
-   - Estabeleça uma meta clara para este follow-up (Ex: Agendar reunião, aprovar orçamento, etc).
-
-REGRA DE OURO: Use um português impecável, corporativo e inspirador. Seja o mentor que o vendedor precisa para fechar essa venda de {dados_negocio['negocio']}."""
-
-    logger.info(f"Processando negócio: {dados_negocio['negocio']} - Empresa: {dados_negocio['empresa']} - Próximo Follow-up: #{proximo_follow}")
+    logger.info(f"Processando análise ROBUSTA para: {dados_negocio['negocio']} - Próximo Follow-up: #{proximo_follow}")
 
     # Lista de modelos válidos (em ordem de preferência)
     modelos_validos = [
@@ -381,14 +348,34 @@ REGRA DE OURO: Use um português impecável, corporativo e inspirador. Seja o me
     # Tenta até o limite configurado caso a API esteja ocupada
     for tentativa in range(MAX_RETRIES):
         try:
-            response = client.chat.completions.create(
-                model=modelo_usar,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=800,
-                temperature=0.7
+            # Delay entre requisições para estabilidade
+            if tentativa > 0:
+                delay = RETRY_DELAY * (2 ** (tentativa - 1))
+                logger.warning(f"Aguardando {delay}s antes da tentativa {tentativa + 1}...")
+                time.sleep(delay)
+
+            response = gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    max_output_tokens=8192,  # AUMENTADO PARA MÁXIMA ROBUSTEZ
+                    temperature=0.8,         # Criatividade leve para melhores argumentos
+                    top_p=0.95,
+                    top_k=40
+                )
             )
             
-            resultado = response.choices[0].message.content
+            resultado = response.text
+            
+            # Se a resposta vier vazia ou muito curta, força um erro para tentar de novo
+            if not resultado or len(resultado) < 200:
+                raise ValueError("Resposta da IA muito curta ou vazia. Tentando novamente para garantir robustez.")
+            
+            # Salva no cache para uso futuro (após o período de testes)
+            cache_analises[hash_cache] = resultado
+            
+            logger.info(f"Análise ROBUSTA Gemini gerada com sucesso para {dados_negocio['negocio']}")
+            return resultado
             
             # Salva no cache
             cache_analises[hash_cache] = resultado
