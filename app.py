@@ -9,7 +9,8 @@ import logging
 import hashlib
 import pandas as pd
 from flask import Flask, render_template, request, flash, redirect, url_for, session, make_response
-from groq import Groq
+from google import genai
+from google.genai import types as genai_types
 from dotenv import load_dotenv
 <<<<<<< HEAD
 from google import genai
@@ -135,15 +136,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-<<<<<<< HEAD
-# Configurações da API de IA (Gemini)
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
-=======
 # Configurações da API Groq (GRATUITA - Recomendada)
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
 RETRY_DELAY = int(os.getenv('RETRY_DELAY', '1'))  # Reduzido para 1 segundo
 REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '0.5'))  # Reduzido para 0.5 segundos para maior velocidade
@@ -197,31 +192,17 @@ def carregar_knowledge_base():
     else:
         logger.warning("Nenhum conteúdo pôde ser extraído dos PDFs")
 
-<<<<<<< HEAD
-if not GEMINI_API_KEY:
-    logger.error("GEMINI_API_KEY não encontrada nas variáveis de ambiente")
-    raise ValueError("GEMINI_API_KEY é obrigatória. Configure no arquivo .env")
-
-# Inicializa o cliente Gemini
-try:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-    logger.info(f"Cliente Gemini configurado com sucesso usando modelo: {GEMINI_MODEL}")
-except Exception as e:
-    logger.error(f"Erro ao configurar cliente Gemini: {str(e)}")
-    raise ValueError("Não foi possível configurar o cliente Gemini. Verifique sua API key e modelo.")
-=======
 if not GROQ_API_KEY:
     logger.error("GROQ_API_KEY não encontrada nas variáveis de ambiente")
     raise ValueError("GROQ_API_KEY é obrigatória. Configure no arquivo .env")
 
-# Inicializa o cliente Groq
+# Inicializa o cliente Gemini (novo SDK google-genai 1.x)
 try:
-    client = Groq(api_key=GROQ_API_KEY)
-    logger.info(f"Cliente Groq configurado com sucesso usando modelo: {GROQ_MODEL}")
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    logger.info(f"Cliente Gemini configurado com sucesso usando modelo: {GEMINI_MODEL}")
 except Exception as e:
     logger.error(f"Erro ao configurar cliente Groq: {str(e)}")
     raise ValueError("Não foi possível configurar o cliente Groq. Verifique sua API key.")
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
 
 # Carrega a knowledge base da empresa ao iniciar
 carregar_knowledge_base()
@@ -315,18 +296,15 @@ def identificar_ultimo_followup(dados_negocio):
 
 def pedir_estrategia_ia(dados_negocio):
     """
-<<<<<<< HEAD
-    Envia o contexto do negócio para a IA Gemini e recebe a estratégia de venda.
-=======
     Envia o contexto do negócio para a IA Groq e recebe a estratégia de venda.
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
     A IA age como um Diretor Comercial experiente.
     """
-    # Verifica cache primeiro
+    # Identifica o hash para evitar requisições duplicadas
     hash_cache = gerar_hash_cache(dados_negocio)
-    if hash_cache in cache_analises:
-        logger.info(f"Retornando análise em cache para {dados_negocio['negocio']}")
-        return cache_analises[hash_cache]
+    
+    # Busca cache desativada temporariamente para forçar a robustez da nova IA
+    # if hash_cache in cache_analises:
+    #     return cache_analises[hash_cache]
 
     # Identifica onde a conversa parou
     ultimo_follow, proximo_follow, temperatura_atual = identificar_ultimo_followup(dados_negocio)
@@ -344,67 +322,51 @@ def pedir_estrategia_ia(dados_negocio):
     if knowledge_base_text:
         conhecimento_empresa = f"""
 CONHECIMENTO DA EMPRESA (VENDAMAIS):
-{knowledge_base_text[:3000]}  # Limita para não exceder o tamanho do prompt
+{knowledge_base_text[:10000]}
 
-Use este conhecimento para alinhar as estratégias com os produtos, serviços e valores da Vendamais."""
+Use TODO o conteúdo técnico acima para embasar sua análise. Cite produtos, serviços e metodologias específicas da Vendamais."""
     else:
-        conhecimento_empresa = "NOTA: Nenhum documento da empresa disponível na knowledge base. Forneça estratégias genéricas de vendas."
+        conhecimento_empresa = "NOTA: Nenhum documento da empresa disponível. Use as melhores práticas mundiais de vendas B2B de alto ticket."
     
-    prompt = f"""Você é um Diretor Comercial experiente com anos de experiência em fechamento de vendas na Vendamais.
+    prompt = f"""Você é um Diretor Comercial Sênior da Vendamais, especialista em fechamentos de alta complexidade e mestre em persuasão. 
+
+Sua missão é dar uma aula de estratégia para o vendedor "{dados_negocio['responsavel']}" sobre como ganhar esse jogo. Sua análise deve ser ROBUSTA, PROFUNDA e ESTRATÉGICA. Não aceite o óbvio.
 
 {conhecimento_empresa}
 
-ANÁLISE DO NEGÓCIO:
-- Nome do Negócio: {dados_negocio['negocio']}
-- Empresa Cliente: {dados_negocio['empresa']}
-- Vendedor/Responsável: {dados_negocio['responsavel']}  # ESTE É QUEM VAI ENVIAR A MENSAGEM
+CONTEXTO DO NEGÓCIO:
+- Negócio: {dados_negocio['negocio']}
+- Cliente: {dados_negocio['empresa']} (Cargo do destinatário: [Nome do Cliente])
+- Responsável: {dados_negocio['responsavel']}
 - Fase Atual: {dados_negocio['fase']}
-- Último Follow-up Realizado: #{ultimo_follow}
-- Próximo Follow-up a Realizar: #{proximo_follow}
-- Temperatura Atual: {temperatura_atual}
+- Próximo Passo: Follow-up #{proximo_follow}
+- Temperatura: {temperatura_atual}
 
-HISTÓRICO DE CONVERSAS:
-{historico_texto if historico_texto else 'Nenhum follow-up realizado ainda.'}
+HISTÓRICO COMPLETO:
+{historico_texto if historico_texto else 'Início de prospecção.'}
 
-INSTRUÇÕES CRUCIAIS:
-1. O "{dados_negocio['responsavel']}" é O VENDEDOR/RESPONSÁVEL que vai ENVIAR a mensagem
-2. O cliente é alguém da "{dados_negocio['empresa']}" (NÃO use o nome do responsável como se fosse o cliente)
-3. NUNCA use o nome do responsável no vocativo ou como destinatário
-4. Use "[Nome do Cliente]" ou contatos da empresa como destinatário
+ESTRUTURA DA SUA RESPOSTA (DETALHADA E SEM CORTES):
 
-EXEMPLOS DE ESTRUTURA CORRETA:
-ERRADO: "Prezado Rafael, analisamos sua proposta..."
-CERTO: "Olá [Nome do Cliente], o Rafael aqui da Vendamais gostaria de saber..."
+1. **ANÁLISE DE CENÁRIO E PSICOLOGIA DO CLIENTE:**
+   - Faça um diagnóstico profundo do momento atual.
+   - O que o cliente está pensando agora? Quais as dores ocultas? 
+   - Identifique objetivamente o risco de perda ou a oportunidade de aceleração.
+   - Analise o comportamento no histórico (se ele esfriou, por que esfriou?).
 
-ERRADO: "João, sobre sua proposta..."
-CERTO: "Olá [Nome do Cliente], o João aqui da Vendamais entra em contato..."
+2. **PLANO DE ATAQUE E ESTRATÉGIA DE COMUNICAÇÃO:**
+   - Crie uma mensagem de contato PRONTA para ser enviada, extremamente persuasiva.
+   - Use gatilhos mentais específicos (Escassez, Autoridade, Prova Social ou Reciprocidade).
+   - Indique exatamente o tom de voz: deve ser desafiador, consultivo ou focado em relacionamento?
+   - Explique o "PORQUÊ" dessa estratégia. Não apenas diga o que fazer, explique a lógica por trás.
 
-SUA MISSÃO:
-Analise a situação e forneça uma orientação estratégica PRÁTICA e DIRETA para o Follow-up #{proximo_follow} que o responsável "{dados_negocio['responsavel']}" vai realizar.
+3. **GATILHOS DE FECHAMENTO E PRÓXIMOS PASSOS:**
+   - Qual a pergunta de "Xeque-Mate" para esse contato?
+   - Defina 3 cenários possíveis de resposta do cliente e como o vendedor deve reagir a cada um.
+   - Estabeleça uma meta clara para este follow-up (Ex: Agendar reunião, aprovar orçamento, etc).
 
-A resposta DEVE conter exatamente estas 3 seções:
-
-1. **DIAGNÓSTICO DA SITUAÇÃO:**
-   - Identifique claramente a temperatura atual (QUENTE/MORNO/FRIO)
-   - Analise o que aconteceu até agora
-   - Identifique objeções, pontos de atenção ou oportunidades
-
-2. **ESTRATÉGIA PARA O PRÓXIMO PASSO:**
-   - O que dizer exatamente no próximo contato (mensagem direta para o CLIENTE)
-   - Argumentos de fechamento específicos para esta situação
-   - Gatilhos mentais ou técnicas de persuasão adequadas
-   - A mensagem deve ser do responsável "{dados_negocio['responsavel']}" para o cliente da "{dados_negocio['empresa']}"
-
-3. **AÇÃO RECOMENDADA:**
-   - Pergunta de fechamento específica
-   - Próximo passo concreto para avançar na venda
-   - Prazo sugerido para o follow-up
-
-Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
+REGRA DE OURO: Use um português impecável, corporativo e inspirador. Seja o mentor que o vendedor precisa para fechar essa venda de {dados_negocio['negocio']}."""
 
     logger.info(f"Processando negócio: {dados_negocio['negocio']} - Empresa: {dados_negocio['empresa']} - Próximo Follow-up: #{proximo_follow}")
-<<<<<<< HEAD
-=======
 
     # Lista de modelos válidos (em ordem de preferência)
     modelos_validos = [
@@ -415,23 +377,10 @@ Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
     ]
     
     modelo_usar = GROQ_MODEL if GROQ_MODEL in modelos_validos else modelos_validos[0]
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
     
     # Tenta até o limite configurado caso a API esteja ocupada
     for tentativa in range(MAX_RETRIES):
         try:
-<<<<<<< HEAD
-            # Pequeno atraso opcional para evitar estouro de cota em chamadas paralelas
-            if REQUEST_DELAY > 0:
-                time.sleep(REQUEST_DELAY)
-
-            response = gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-            )
-            
-            resultado = response.text
-=======
             response = client.chat.completions.create(
                 model=modelo_usar,
                 messages=[{"role": "user", "content": prompt}],
@@ -440,25 +389,16 @@ Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
             )
             
             resultado = response.choices[0].message.content
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
             
             # Salva no cache
             cache_analises[hash_cache] = resultado
             
-<<<<<<< HEAD
-            logger.info(f"Análise gerada com sucesso para {dados_negocio['negocio']} usando modelo Gemini ({GEMINI_MODEL}) (tentativa {tentativa + 1})")
-=======
             logger.info(f"Análise gerada com sucesso para {dados_negocio['negocio']} usando modelo {modelo_usar} (tentativa {tentativa + 1})")
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
             return resultado
             
         except Exception as e:
             error_msg = str(e).lower()
             
-<<<<<<< HEAD
-            if "rate" in error_msg or "limit" in error_msg or "quota" in error_msg or "too many" in error_msg:
-                logger.warning(f"Limite de cota da API atingido. Tentativa {tentativa + 1}/{MAX_RETRIES}")
-=======
             # Se o modelo foi descontinuado, tenta outro modelo
             if "decommissioned" in error_msg or "no longer supported" in error_msg or "model_decommissioned" in error_msg:
                 logger.warning(f"Modelo {modelo_usar} foi descontinuado. Tentando modelo alternativo...")
@@ -474,7 +414,6 @@ Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
             
             if "rate" in error_msg or "limit" in error_msg or "too many" in error_msg:
                 logger.warning(f"Limite de cota Groq atingido. Tentativa {tentativa + 1}/{MAX_RETRIES}")
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
                 if tentativa < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY)
                 continue
@@ -1326,39 +1265,37 @@ def processar():
                     linhas_com_erro += 1
                     continue
 
-            logger.info(f"Iniciando processamento paralelo de {len(itens_para_processar)} itens com {MAX_WORKERS} threads")
+            logger.info(f"Iniciando processamento sequencial de {len(itens_para_processar)} itens (Qualidade > Velocidade)")
             
-            # Processamento paralelo com ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                # Envia todos os itens para processamento paralelo
-                future_to_item = {executor.submit(processar_item_thread, item): item for item in itens_para_processar}
-                
-                # Coleta os resultados conforme ficam prontos
-                for future in as_completed(future_to_item):
-                    try:
-                        item_processado, erro = future.result()
-                        
-                        if erro:
-                            logger.warning(f"Item processado com erro: {erro}")
-                            linhas_com_erro += 1
-                        else:
-                            linhas_processadas += 1
-                        
-                        relatorio_final.append(item_processado)
-                        
-                        # Adiciona ao agrupamento por Responsável
-                        responsavel = item_processado['responsavel'] or 'Não informado'
-                        if responsavel not in relatorio_agrupado:
-                            relatorio_agrupado[responsavel] = []
-                        relatorio_agrupado[responsavel].append(item_processado)
-                        
-                        # Progress log
-                        if len(relatorio_final) % 5 == 0:
-                            logger.info(f"Progresso paralelo: {len(relatorio_final)}/{len(itens_para_processar)} itens concluídos")
-                        
-                    except Exception as e:
-                        logger.error(f"Erro ao processar resultado paralelo: {str(e)}")
+            # Processamento sequencial (um por um) para maior robustez
+            for index, item in enumerate(itens_para_processar):
+                try:
+                    logger.info(f"Processando item {index + 1}/{len(itens_para_processar)}: {item['negocio']}")
+                    
+                    # Delay entre requisições para evitar burst e garantir estabilidade
+                    if index > 0:
+                        time.sleep(REQUEST_DELAY)
+                    
+                    item_processado, erro = processar_item_thread(item)
+                    
+                    if erro:
+                        logger.warning(f"Item {index + 1} processado com erro: {erro}")
                         linhas_com_erro += 1
+                    else:
+                        linhas_processadas += 1
+                        logger.info(f"✅ Item {index + 1} concluído com sucesso")
+                    
+                    relatorio_final.append(item_processado)
+                    
+                    # Agrupamento por Responsável
+                    responsavel = item_processado.get('responsavel') or 'Não informado'
+                    if responsavel not in relatorio_agrupado:
+                        relatorio_agrupado[responsavel] = []
+                    relatorio_agrupado[responsavel].append(item_processado)
+                    
+                except Exception as e:
+                    logger.error(f"Erro ao processar item {index + 1}: {str(e)}")
+                    linhas_com_erro += 1
 
             logger.info(f"Processamento concluído: {linhas_processadas} sucessos, {linhas_com_erro} erros")
             logger.info(f"Responsáveis identificados: {list(relatorio_agrupado.keys())}")
@@ -1390,13 +1327,12 @@ def processar():
             }
             salvar_relatorio_cache(dados_cache, relatorio_id)
             
-            # Mantém na sessão como backup (mas não depende apenas disso)
-            if 'relatorios' not in session:
-                session['relatorios'] = {}
-            session['relatorios'][relatorio_id] = relatorio_id  # Apenas o ID
+            # ATENÇÃO: Salvamos APENAS o ID na sessão para não estourar o limite de cookie
             session['relatorio_id_atual'] = relatorio_id
-            session['relatorio_data'] = dados_cache  # Salva os dados completos como backup
-            session.permanent = True  # Garante que a sessão persista
+            session.permanent = True 
+            
+            # Removemos dados pesados da sessão que causam erro 'cookie too large'
+            session.pop('relatorio_data', None)
             
             logger.info(f"Relatório armazenado com ID: {relatorio_id}")
             
@@ -2076,9 +2012,5 @@ if __name__ == '__main__':
     debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
     
     logger.info(f"Iniciando servidor Flask na porta {port} (debug={debug})")
-<<<<<<< HEAD
-    logger.info(f"Usando API Gemini com modelo: {GEMINI_MODEL}")
-=======
     logger.info(f"Usando API Groq com modelo: {GROQ_MODEL}")
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
     app.run(debug=debug, port=port)
