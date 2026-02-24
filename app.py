@@ -11,7 +11,10 @@ import pandas as pd
 from flask import Flask, render_template, request, flash, redirect, url_for, session, make_response
 from groq import Groq
 from dotenv import load_dotenv
+<<<<<<< HEAD
 from google import genai
+=======
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
 import tempfile
 from werkzeug.utils import secure_filename
 from reportlab.lib.pagesizes import A4
@@ -132,9 +135,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+<<<<<<< HEAD
 # Configurações da API de IA (Gemini)
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
+=======
+# Configurações da API Groq (GRATUITA - Recomendada)
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
 RETRY_DELAY = int(os.getenv('RETRY_DELAY', '1'))  # Reduzido para 1 segundo
 REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '0.5'))  # Reduzido para 0.5 segundos para maior velocidade
@@ -188,6 +197,7 @@ def carregar_knowledge_base():
     else:
         logger.warning("Nenhum conteúdo pôde ser extraído dos PDFs")
 
+<<<<<<< HEAD
 if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY não encontrada nas variáveis de ambiente")
     raise ValueError("GEMINI_API_KEY é obrigatória. Configure no arquivo .env")
@@ -199,6 +209,19 @@ try:
 except Exception as e:
     logger.error(f"Erro ao configurar cliente Gemini: {str(e)}")
     raise ValueError("Não foi possível configurar o cliente Gemini. Verifique sua API key e modelo.")
+=======
+if not GROQ_API_KEY:
+    logger.error("GROQ_API_KEY não encontrada nas variáveis de ambiente")
+    raise ValueError("GROQ_API_KEY é obrigatória. Configure no arquivo .env")
+
+# Inicializa o cliente Groq
+try:
+    client = Groq(api_key=GROQ_API_KEY)
+    logger.info(f"Cliente Groq configurado com sucesso usando modelo: {GROQ_MODEL}")
+except Exception as e:
+    logger.error(f"Erro ao configurar cliente Groq: {str(e)}")
+    raise ValueError("Não foi possível configurar o cliente Groq. Verifique sua API key.")
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
 
 # Carrega a knowledge base da empresa ao iniciar
 carregar_knowledge_base()
@@ -292,7 +315,11 @@ def identificar_ultimo_followup(dados_negocio):
 
 def pedir_estrategia_ia(dados_negocio):
     """
+<<<<<<< HEAD
     Envia o contexto do negócio para a IA Gemini e recebe a estratégia de venda.
+=======
+    Envia o contexto do negócio para a IA Groq e recebe a estratégia de venda.
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
     A IA age como um Diretor Comercial experiente.
     """
     # Verifica cache primeiro
@@ -376,10 +403,24 @@ A resposta DEVE conter exatamente estas 3 seções:
 Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
 
     logger.info(f"Processando negócio: {dados_negocio['negocio']} - Empresa: {dados_negocio['empresa']} - Próximo Follow-up: #{proximo_follow}")
+<<<<<<< HEAD
+=======
+
+    # Lista de modelos válidos (em ordem de preferência)
+    modelos_validos = [
+        'llama-3.3-70b-versatile',  # Modelo atual recomendado
+        'llama-3.1-8b-instruct',   # Fallback rápido
+        'mixtral-8x7b-32768',       # Alternativa Mixtral
+        'gemma2-9b-it'              # Alternativa Gemma
+    ]
+    
+    modelo_usar = GROQ_MODEL if GROQ_MODEL in modelos_validos else modelos_validos[0]
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
     
     # Tenta até o limite configurado caso a API esteja ocupada
     for tentativa in range(MAX_RETRIES):
         try:
+<<<<<<< HEAD
             # Pequeno atraso opcional para evitar estouro de cota em chamadas paralelas
             if REQUEST_DELAY > 0:
                 time.sleep(REQUEST_DELAY)
@@ -390,18 +431,50 @@ Seja DIRETO, PRÁTICO e FOQUE EM FECHAR A VENDA. Não seja genérico."""
             )
             
             resultado = response.text
+=======
+            response = client.chat.completions.create(
+                model=modelo_usar,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=800,
+                temperature=0.7
+            )
+            
+            resultado = response.choices[0].message.content
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
             
             # Salva no cache
             cache_analises[hash_cache] = resultado
             
+<<<<<<< HEAD
             logger.info(f"Análise gerada com sucesso para {dados_negocio['negocio']} usando modelo Gemini ({GEMINI_MODEL}) (tentativa {tentativa + 1})")
+=======
+            logger.info(f"Análise gerada com sucesso para {dados_negocio['negocio']} usando modelo {modelo_usar} (tentativa {tentativa + 1})")
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
             return resultado
             
         except Exception as e:
             error_msg = str(e).lower()
             
+<<<<<<< HEAD
             if "rate" in error_msg or "limit" in error_msg or "quota" in error_msg or "too many" in error_msg:
                 logger.warning(f"Limite de cota da API atingido. Tentativa {tentativa + 1}/{MAX_RETRIES}")
+=======
+            # Se o modelo foi descontinuado, tenta outro modelo
+            if "decommissioned" in error_msg or "no longer supported" in error_msg or "model_decommissioned" in error_msg:
+                logger.warning(f"Modelo {modelo_usar} foi descontinuado. Tentando modelo alternativo...")
+                # Tenta próximo modelo da lista
+                idx_atual = modelos_validos.index(modelo_usar) if modelo_usar in modelos_validos else 0
+                if idx_atual < len(modelos_validos) - 1:
+                    modelo_usar = modelos_validos[idx_atual + 1]
+                    logger.info(f"Tentando com modelo alternativo: {modelo_usar}")
+                    continue
+                else:
+                    logger.error(f"Todos os modelos testados foram descontinuados")
+                    return "Erro: Modelo de IA descontinuado. Por favor, atualize o GROQ_MODEL no arquivo .env para 'llama-3.3-70b-versatile'"
+            
+            if "rate" in error_msg or "limit" in error_msg or "too many" in error_msg:
+                logger.warning(f"Limite de cota Groq atingido. Tentativa {tentativa + 1}/{MAX_RETRIES}")
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
                 if tentativa < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY)
                 continue
@@ -2003,5 +2076,9 @@ if __name__ == '__main__':
     debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
     
     logger.info(f"Iniciando servidor Flask na porta {port} (debug={debug})")
+<<<<<<< HEAD
     logger.info(f"Usando API Gemini com modelo: {GEMINI_MODEL}")
+=======
+    logger.info(f"Usando API Groq com modelo: {GROQ_MODEL}")
+>>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
     app.run(debug=debug, port=port)
