@@ -12,10 +12,6 @@ from flask import Flask, render_template, request, flash, redirect, url_for, ses
 from google import genai
 from google.genai import types as genai_types
 from dotenv import load_dotenv
-<<<<<<< HEAD
-from google import genai
-=======
->>>>>>> abfb31a000e8d1a8eec3bdd4dbef1827aba10fb4
 import tempfile
 from werkzeug.utils import secure_filename
 from reportlab.lib.pagesizes import A4
@@ -316,36 +312,26 @@ Use TODO o conteúdo técnico acima para embasar sua análise. Cite produtos, se
     else:
         conhecimento_empresa = "NOTA: Nenhum documento da empresa disponível. Use as melhores práticas mundiais de vendas B2B de alto ticket."
     
-    prompt = f"""Você é um Diretor Comercial Sênior da Vendamais. Dê uma orientação estratégica equilibrada para o vendedor "{dados_negocio['responsavel']}".
+    prompt = f"""Você é um Mentor Comercial experiente da Vendamais. Dê uma letra RÁPIDA e FLUIDA para o vendedor "{dados_negocio['responsavel']}". Imagine que você está dando um toque rápido para ele fechar o negócio.
 
 {conhecimento_empresa}
 
 CONTEXTO:
-- Negócio/Cliente: {dados_negocio['negocio']} | {dados_negocio['empresa']}
-- Próximo Passo: Follow-up #{proximo_follow} (Temperatura: {temperatura_atual})
+- Cliente: {dados_negocio['negocio']} ({dados_negocio['empresa']})
+- Próximo Passo: Follow-up #{proximo_follow} (🌡️ {temperatura_atual})
 
-HISTÓRICO: {historico_texto if historico_texto else 'Início de prospecção.'}
+HISTÓRICO: {historico_texto if historico_texto else 'Primeiro contato agora.'}
 
-ESTRUTURA DA RESPOSTA:
-1. **SITUAÇÃO:** Resuma em um parágrafo curto (3-4 frases) o cenário atual, o que o cliente está sentindo e o principal desafio.
-2. **MENSAGEM RECOMENDADA:** Crie uma mensagem persuasiva e profissional pronta para enviar. Use gatilhos mentais da Vendamais.
-3. **PRÓXIMO PASSO:** Defina a meta clara deste contato e como conduzir para o fechamento.
+ESTRUTURA (SEJA DIRETO E USE LINGUAGEM HUMANA, SEM JARGÕES PESADOS):
+1. **SITUAÇÃO:** O que está rolando? Explique o cenário e a indecisão do cliente (visão JOLT) de forma bem natural, como uma conversa.
+2. **MENSAGEM RECOMENDADA:** Um texto pronto que soe humano (WhatsApp/Email). Nada de "prezado" ou "venho por meio desta". Seja persuasivo, dê uma recomendação clara e tire o medo dele de decidir.
+3. **PRÓXIMO PASSO:** Qual o jogo aqui? Define a meta pra avançar e matar a inércia.
 
-REGRA: Seja direto e profissional. Evite introduções desnecessárias, mas forneça substância estratégica em cada tópico."""
+REGRA: Papo reto, fluido e estratégico. Proibido introduções tipo "Muito bem...", "Com base no histórico..." ou "Prezado vendedor". Vai direto ao ponto com autoridade, mas sem formalismo excessivo."""
 
-    logger.info(f"Processando análise ROBUSTA para: {dados_negocio['negocio']} - Próximo Follow-up: #{proximo_follow}")
+    logger.info(f"Gerando orientação direta e fluida para: {dados_negocio['negocio']} - #{proximo_follow}")
 
-    # Lista de modelos válidos (em ordem de preferência)
-    modelos_validos = [
-        'llama-3.3-70b-versatile',  # Modelo atual recomendado
-        'llama-3.1-8b-instruct',   # Fallback rápido
-        'mixtral-8x7b-32768',       # Alternativa Mixtral
-        'gemma2-9b-it'              # Alternativa Gemma
-    ]
-    
-    modelo_usar = GROQ_MODEL if GROQ_MODEL in modelos_validos else modelos_validos[0]
-    
-    # Tenta até o limite configurado caso a API esteja ocupada
+    # Tenta até o limite configurado com backoff exponencial para rate limits
     for tentativa in range(MAX_RETRIES):
         try:
             # Delay entre requisições para estabilidade
@@ -358,7 +344,7 @@ REGRA: Seja direto e profissional. Evite introduções desnecessárias, mas forn
                 model=GEMINI_MODEL,
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
-                    max_output_tokens=8192,  # AUMENTADO PARA MÁXIMA ROBUSTEZ
+                    max_output_tokens=4096,  # Equilíbrio entre robustez e brevidade
                     temperature=0.8,         # Criatividade leve para melhores argumentos
                     top_p=0.95,
                     top_k=40
@@ -368,48 +354,23 @@ REGRA: Seja direto e profissional. Evite introduções desnecessárias, mas forn
             resultado = response.text
             
             # Se a resposta vier vazia ou muito curta, força um erro para tentar de novo
-            if not resultado or len(resultado) < 200:
-                raise ValueError("Resposta da IA muito curta ou vazia. Tentando novamente para garantir robustez.")
+            if not resultado or len(resultado) < 50:
+                raise ValueError("Resposta da IA muito curta ou vazia.")
             
-            # Salva no cache para uso futuro (após o período de testes)
+            # Salva no cache para uso futuro
             cache_analises[hash_cache] = resultado
             
-            logger.info(f"Análise ROBUSTA Gemini gerada com sucesso para {dados_negocio['negocio']}")
-            return resultado
-            
-            # Salva no cache
-            cache_analises[hash_cache] = resultado
-            
-            logger.info(f"Análise gerada com sucesso para {dados_negocio['negocio']} usando modelo {modelo_usar} (tentativa {tentativa + 1})")
+            logger.info(f"Orientação gerada com sucesso para {dados_negocio['negocio']}")
             return resultado
             
         except Exception as e:
             error_msg = str(e).lower()
-            
-            # Se o modelo foi descontinuado, tenta outro modelo
-            if "decommissioned" in error_msg or "no longer supported" in error_msg or "model_decommissioned" in error_msg:
-                logger.warning(f"Modelo {modelo_usar} foi descontinuado. Tentando modelo alternativo...")
-                # Tenta próximo modelo da lista
-                idx_atual = modelos_validos.index(modelo_usar) if modelo_usar in modelos_validos else 0
-                if idx_atual < len(modelos_validos) - 1:
-                    modelo_usar = modelos_validos[idx_atual + 1]
-                    logger.info(f"Tentando com modelo alternativo: {modelo_usar}")
-                    continue
-                else:
-                    logger.error(f"Todos os modelos testados foram descontinuados")
-                    return "Erro: Modelo de IA descontinuado. Por favor, atualize o GROQ_MODEL no arquivo .env para 'llama-3.3-70b-versatile'"
-            
-            if "rate" in error_msg or "limit" in error_msg or "too many" in error_msg:
-                logger.warning(f"Limite de cota Groq atingido. Tentativa {tentativa + 1}/{MAX_RETRIES}")
-                if tentativa < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY)
-                continue
-            else:
-                logger.error(f"Erro na análise do negócio {dados_negocio['negocio']}: {str(e)}")
-                return f"Erro na análise desta linha: {str(e)}"
+            logger.error(f"Erro na análise do negócio {dados_negocio['negocio']}: {str(e)}")
+            if tentativa == MAX_RETRIES - 1:
+                return f"Erro na análise (IA indisponível): {str(e)}"
+            continue
 
-    logger.error(f"Não foi possível gerar análise para {dados_negocio['negocio']} (limite de tentativas excedido)")
-    return "Não foi possível gerar a análise para este item (limite de tentativas excedido)."
+    return "Não foi possível gerar a análise (limite de tentativas excedido)."
 
 
 def filtrar_negocios_por_fase(relatorio):
@@ -1585,19 +1546,17 @@ def gerar_pdf_responsavel(responsavel):
             fontName='Helvetica-Bold'
         )
         
-        # Estilo para Nome do Negócio
+        # Estilo para Nome do Negócio - Visual limpo e direto
         business_style = ParagraphStyle(
             'BusinessTitle',
             parent=styles['Heading2'],
             fontSize=16,
-            spaceAfter=10,
+            spaceAfter=12,
             spaceBefore=20,
             textColor=VM_ORANGE,
             fontName='Helvetica-Bold',
-            borderPadding=5,
-            borderColor=VM_GREEN,
             borderWidth=0,
-            backColor=colors.Color(0.95, 0.95, 0.95) # Fundo cinza claro
+            leading=20
         )
         
         # Estilo para Subtítulos (Diagnóstico, Estratégia, etc)
@@ -1633,12 +1592,23 @@ def gerar_pdf_responsavel(responsavel):
         # Conteúdo do PDF
         story = []
         
-        # Título
-        story.append(Paragraph(f"Relatório Individual - {responsavel}", title_style))
-        story.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}", 
-                             ParagraphStyle('Date', parent=normal_style, alignment=1, textColor=colors.gray)))
-        story.append(Paragraph(f"Total de Negócios: {total}", 
-                             ParagraphStyle('Total', parent=normal_style, alignment=1, textColor=colors.gray)))
+        # Cabeçalho Limpo - Sem fundo verde pesado (como solicitado)
+        header_data = [
+            [Paragraph(f"<font color='{VM_GREEN}'>RELATÓRIO ESTRATÉGICO</font>", 
+                       ParagraphStyle('HeaderTitle', parent=title_style, fontSize=22, alignment=0, spaceAfter=0)),
+             Paragraph(f"<b>Vendedor:</b> {responsavel}<br/><b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}", 
+                       ParagraphStyle('HeaderInfo', parent=normal_style, textColor=colors.gray, alignment=2, leading=14))]
+        ]
+        header_table = Table(header_data, colWidths=[4.2*inch, 2.8*inch])
+        header_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+            ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'BOTTOM'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+            ('LINEBELOW', (0, 0), (-1, -1), 1, VM_GREEN), # Linha sutil verde apenas embaixo
+        ]))
+        story.append(header_table)
+        story.append(Spacer(1, 25))
         story.append(Spacer(1, 30))
         
         # Análises detalhadas
@@ -1671,51 +1641,56 @@ def gerar_pdf_responsavel(responsavel):
             # Processamento da Análise da IA
             analise_text = item.get('analise_proximo_passo', '')
             
-            # Remove os marcadores de markdown ** se existirem
-            analise_text = analise_text.replace('**DIAGNÓSTICO DA SITUAÇÃO:**', 'DIAGNÓSTICO DA SITUAÇÃO')
-            analise_text = analise_text.replace('**ESTRATÉGIA PARA O PRÓXIMO PASSO:**', 'ESTRATÉGIA PARA O PRÓXIMO PASSO')
-            analise_text = analise_text.replace('**AÇÃO RECOMENDADA:**', 'AÇÃO RECOMENDADA')
-            
             # Divide o texto em linhas para processar
             lines = analise_text.split('\n')
+            sections_added = set() # Controle de duplicidade
             
             for line in lines:
-                line = line.strip()
-                if not line:
+                line_plain = line.replace('*', '').strip()
+                if not line_plain: continue
+                
+                line_upper = line_plain.upper()
+                
+                # Verifica se é um cabeçalho de seção - Lógica mais rigorosa para evitar duplicados
+                if 'SITUAÇÃO' in line_upper and 'SIT' not in sections_added:
+                    elements.append(Paragraph("🔍 SITUAÇÃO", section_header_style))
+                    sections_added.add('SIT')
+                elif 'MENSAGEM' in line_upper and 'MSG' not in sections_added:
+                    elements.append(Paragraph("💬 MENSAGEM RECOMENDADA", section_header_style))
+                    sections_added.add('MSG')
+                elif ('PRÓXIMO PASSO' in line_upper or 'META' in line_upper) and 'PROX' not in sections_added:
+                    elements.append(Paragraph("🎯 PRÓXIMO PASSO & META", section_header_style))
+                    sections_added.add('PROX')
+                elif any(kw in line_upper for kw in ['SITUAÇÃO', 'MENSAGEM', 'PRÓXIMO PASSO', 'META']):
+                    # Se já adicionou o cabeçalho, ignora a linha que repete o nome da seção
                     continue
-                    
-                # Verifica se é um cabeçalho de seção
-                if 'DIAGNÓSTICO DA SITUAÇÃO' in line:
-                    elements.append(Paragraph("🔍 DIAGNÓSTICO DA SITUAÇÃO", section_header_style))
-                elif 'ESTRATÉGIA PARA O PRÓXIMO PASSO' in line:
-                    elements.append(Paragraph("🎯 ESTRATÉGIA PARA O PRÓXIMO PASSO", section_header_style))
-                elif 'AÇÃO RECOMENDADA' in line:
-                    elements.append(Paragraph("🚀 AÇÃO RECOMENDADA", section_header_style))
                 else:
-                    # Remove asteriscos de markdown se sobrarem
+                    # Conteúdo normal
                     clean_line = line.replace('**', '').strip()
-                    if clean_line.startswith('-'):
-                        # Item de lista
-                        elements.append(Paragraph(f"• {clean_line[1:].strip()}", normal_style))
+                    if clean_line.startswith('-') or clean_line.startswith('•'):
+                        texto_limpo = clean_line[1:].strip()
+                        if texto_limpo:
+                            elements.append(Paragraph(f"• {texto_limpo}", normal_style))
                     else:
                         elements.append(Paragraph(clean_line, normal_style))
             
-            elements.append(Spacer(1, 20))
+            elements.append(Spacer(1, 15))
             
             # Adiciona ao story (tenta manter junto)
             story.append(KeepTogether(elements))
             
-            # Linha divisória
+            # Linha divisória sutil
             if i < total:
                 story.append(Spacer(1, 10))
-                story.append(Paragraph("_" * 60, ParagraphStyle('Line', parent=normal_style, alignment=1, textColor=colors.lightgrey)))
+                story.append(Table([[Spacer(1, 1)]], colWidths=[7*inch], 
+                                  style=[('LINEABOVE', (0,0), (-1,-1), 0.5, colors.HexColor('#e0e0e0'))]))
                 story.append(Spacer(1, 20))
         
         # Rodapé
         story.append(Spacer(1, 30))
-        story.append(Paragraph(f"Relatório individual gerado para: {responsavel}", 
+        story.append(Paragraph(f"Relatório individual gerado para: <b>{responsavel}</b>", 
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
-        story.append(Paragraph("Relatório gerado por Sistema de Automação de Vendas", 
+        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.", 
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
         
         # Gera o PDF
@@ -1861,10 +1836,23 @@ def gerar_pdf():
         # Conteúdo do PDF
         story = []
         
-        # Título
-        story.append(Paragraph("Relatório de Análise Estratégica", title_style))
-        story.append(Paragraph(f"Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}", 
-                             ParagraphStyle('Date', parent=normal_style, alignment=1, textColor=colors.gray)))
+        # Cabeçalho Limpo - Sem fundo verde pesado
+        header_data = [
+            [Paragraph(f"<font color='{VM_GREEN}'>RELATÓRIO ESTRATÉGICO GERAL</font>", 
+                       ParagraphStyle('HeaderTitle', parent=title_style, fontSize=20, alignment=0, spaceAfter=0)),
+             Paragraph(f"<b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}<br/><b>Total:</b> {total} análises", 
+                       ParagraphStyle('HeaderInfo', parent=normal_style, textColor=colors.gray, alignment=2, leading=14))]
+        ]
+        header_table = Table(header_data, colWidths=[4.2*inch, 2.8*inch])
+        header_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+            ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'BOTTOM'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+            ('LINEBELOW', (0, 0), (-1, -1), 1, VM_GREEN), # Linha sutil verde apenas embaixo
+        ]))
+        story.append(header_table)
+        story.append(Spacer(1, 25))
         story.append(Spacer(1, 30))
         
         # Análises detalhadas
@@ -1897,49 +1885,54 @@ def gerar_pdf():
             # Processamento da Análise da IA
             analise_text = item.get('analise_proximo_passo', '')
             
-            # Remove os marcadores de markdown ** se existirem
-            analise_text = analise_text.replace('**DIAGNÓSTICO DA SITUAÇÃO:**', 'DIAGNÓSTICO DA SITUAÇÃO')
-            analise_text = analise_text.replace('**ESTRATÉGIA PARA O PRÓXIMO PASSO:**', 'ESTRATÉGIA PARA O PRÓXIMO PASSO')
-            analise_text = analise_text.replace('**AÇÃO RECOMENDADA:**', 'AÇÃO RECOMENDADA')
-            
             # Divide o texto em linhas para processar
             lines = analise_text.split('\n')
+            sections_added = set() # Controle de duplicidade
             
             for line in lines:
-                line = line.strip()
-                if not line:
+                line_plain = line.replace('*', '').strip()
+                if not line_plain: continue
+                
+                line_upper = line_plain.upper()
+                
+                # Verifica se é um cabeçalho de seção - Lógica mais rigorosa para evitar duplicados
+                if 'SITUAÇÃO' in line_upper and 'SIT' not in sections_added:
+                    elements.append(Paragraph("🔍 SITUAÇÃO", section_header_style))
+                    sections_added.add('SIT')
+                elif 'MENSAGEM' in line_upper and 'MSG' not in sections_added:
+                    elements.append(Paragraph("💬 MENSAGEM RECOMENDADA", section_header_style))
+                    sections_added.add('MSG')
+                elif ('PRÓXIMO PASSO' in line_upper or 'META' in line_upper) and 'PROX' not in sections_added:
+                    elements.append(Paragraph("🎯 PRÓXIMO PASSO & META", section_header_style))
+                    sections_added.add('PROX')
+                elif any(kw in line_upper for kw in ['SITUAÇÃO', 'MENSAGEM', 'PRÓXIMO PASSO', 'META']):
+                    # Se já adicionou o cabeçalho, ignora a linha que repete o nome da seção
                     continue
-                    
-                # Verifica se é um cabeçalho de seção
-                if 'DIAGNÓSTICO DA SITUAÇÃO' in line:
-                    elements.append(Paragraph("🔍 DIAGNÓSTICO DA SITUAÇÃO", section_header_style))
-                elif 'ESTRATÉGIA PARA O PRÓXIMO PASSO' in line:
-                    elements.append(Paragraph("🎯 ESTRATÉGIA PARA O PRÓXIMO PASSO", section_header_style))
-                elif 'AÇÃO RECOMENDADA' in line:
-                    elements.append(Paragraph("🚀 AÇÃO RECOMENDADA", section_header_style))
                 else:
-                    # Remove asteriscos de markdown se sobrarem
+                    # Conteúdo normal
                     clean_line = line.replace('**', '').strip()
-                    if clean_line.startswith('-'):
-                        # Item de lista
-                        elements.append(Paragraph(f"• {clean_line[1:].strip()}", normal_style))
+                    if clean_line.startswith('-') or clean_line.startswith('•'):
+                        texto_limpo = clean_line[1:].strip()
+                        if texto_limpo:
+                            elements.append(Paragraph(f"• {texto_limpo}", normal_style))
                     else:
                         elements.append(Paragraph(clean_line, normal_style))
             
-            elements.append(Spacer(1, 20))
+            elements.append(Spacer(1, 15))
             
             # Adiciona ao story (tenta manter junto)
             story.append(KeepTogether(elements))
             
-            # Linha divisória
+            # Linha divisória sutil
             if i < total:
                 story.append(Spacer(1, 10))
-                story.append(Paragraph("_" * 60, ParagraphStyle('Line', parent=normal_style, alignment=1, textColor=colors.lightgrey)))
+                story.append(Table([[Spacer(1, 1)]], colWidths=[7*inch], 
+                                  style=[('LINEABOVE', (0,0), (-1,-1), 0.5, colors.HexColor('#e0e0e0'))]))
                 story.append(Spacer(1, 20))
         
         # Rodapé
         story.append(Spacer(1, 30))
-        story.append(Paragraph("Relatório gerado por Sistema de Automação de Vendas", 
+        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.", 
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
         
         # Gera o PDF
