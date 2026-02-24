@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Análise Estratégica de CRM</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container upload-container">
+        <div class="upload-card">
+            <div class="upload-icon"></div>
+            
+            <h1 class="upload-title">Automação de Follow-up</h1>
+            <p class="upload-subtitle">Suba sua planilha e deixe a IA definir a próxima estratégia de venda.</p>
+
+            <form id="uploadForm" action="/processar" method="post" enctype="multipart/form-data">
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% if messages %}
+                        {% for category, message in messages %}
+                            <div class="alert alert-{{ category }}">
+                                {{ message }}
+                            </div>
+                        {% endfor %}
+                    {% endif %}
+                {% endwith %}
+                
+                <div class="file-input-wrapper">
+                    <input type="file" name="file" accept=".xlsx, .xls, .csv" required>
+                </div>
+                
+                <div class="additional-info">
+                    <div class="info-item">
+                        <span class="info-label">Total de Negócios:</span>
+                        <span class="info-value">{{ total }}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Análises Geradas:</span>
+                        <span class="info-value">IA Groq</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Data do Processamento:</span>
+                        <span class="info-value">{{ moment().format('DD/MM/YYYY HH:mm') if moment else 'Agora' }}</span>
+                    </div>
+                    <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(74, 157, 106, 0.2); text-align: center;">
+                        <a href="{{ url_for('index') }}" class="btn-secondary" style="margin-right: 10px;">
+                            🔄 Processar Nova Planilha
+                        </a>
+                        <a href="{{ url_for('limpar_sessao') }}" class="btn-secondary" style="background: var(--vm-gray-600);">
+                            Limpar Sessão
+                        </a>
+                    </div>
+                </div>
+                
+                <button type="submit" id="btnEnviar" class="btn-enviar">
+                    Analisar Planilha com IA
+                </button>
+            </form>
+
+            <div id="loadingArea">
+                <div class="spinner"></div>
+                <p><strong>A Inteligência Artificial está processando os dados...</strong></p>
+                <p id="timerMessage">
+                    Como estamos analisando linha por linha, isso pode levar alguns minutos dependendo do tamanho da sua planilha.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('uploadForm');
+        const loadingArea = document.getElementById('loadingArea');
+        const btn = document.getElementById('btnEnviar');
+
+        form.onsubmit = function() {
+            // Desabilita o botão para evitar múltiplos cliques
+            btn.style.display = 'none';
+            // Mostra a animação de carregamento
+            loadingArea.style.display = 'block';
+            
+            // Rola a página para baixo para focar no loader
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Relatório Gerado | Automação de Vendas</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="container">
+        <!-- Cabeçalho do Relatório -->
+        <div class="report-header">
+            <h1>Relatório de Análise Estratégica</h1>
+            <p>Análises geradas com Inteligência Artificial (Groq)</p>
+            <div class="report-stats">
+                <div class="stat-item">
+                    <div class="stat-label">Total de Negócios</div>
+                    <div class="stat-value" id="total-count">{{ total }}</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Análises Geradas</div>
+                    <div class="stat-value">{{ total }}</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Data</div>
+                    <div class="stat-value">{{ moment().format('DD/MM') if moment else 'Hoje' }}</div>
+                </div>
+            </div>
+
+            <!-- Filtros -->
+            <div class="filters-section"
+                style="margin-top: 20px; display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
+                <div class="filter-group">
+                    <input type="text" id="filter-responsavel" placeholder="Filtrar por Responsável..."
+                        class="filter-input"
+                        style="padding: 10px; border-radius: 8px; border: 1px solid #ddd; width: 250px;">
+                </div>
+                <div class="filter-group">
+                    <input type="text" id="filter-empresa" placeholder="Filtrar por Empresa..." class="filter-input"
+                        style="padding: 10px; border-radius: 8px; border: 1px solid #ddd; width: 250px;">
+                </div>
+            </div>
+        </div>
+
+        <!-- Seção de Responsáveis -->
+        {% if responsaveis %}
+        <div class="responsaveis-section">
+            <h2>📊 Análises por Responsável</h2>
+            <p>Clique em um Responsável para visualizar suas análises individuais:</p>
+            <div class="responsaveis-grid">
+                {% for responsavel in responsaveis %}
+                <a href="{{ url_for('ver_responsavel', responsavel=responsavel) }}" class="responsavel-card">
+                    <div class="responsavel-avatar">👤</div>
+                    <div class="responsavel-info">
+                        <h3>{{ responsavel }}</h3>
+                        <p>{{ relatorio_agrupado[responsavel]|length }} negócio(s)</p>
+                    </div>
+                    <div class="responsavel-arrow">→</div>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Cards de cada Negócio (OCULTO - apenas mostrar se não houver responsáveis) -->
+        {% if not responsaveis %}
+        {% for item in relatorio %}
+        <div class="negocio-card">
+            <!-- Cabeçalho do Negócio -->
+            <div class="negocio-header">
+                <div>
+                    <h2 class="negocio-title">{{ item.negocio }}</h2>
+                    <div class="negocio-meta">
+                        <span class="meta-badge badge-fase">{{ item.fase }}</span>
+                        <span class="meta-badge badge-resp">👤 {{ item.responsavel }}</span>
+                        <span class="meta-badge badge-temp">🌡️ {{ item.get('temperatura_atual', 'Não informada')
+                            }}</span>
+                        {% if item.get('ultimo_follow', 0) > 0 %}
+                        <span class="meta-badge badge-follow">📞 Último: #{{ item.ultimo_follow }}</span>
+                        {% endif %}
+                        <span class="meta-badge badge-follow">➡️ Próximo: #{{ item.get('proximo_follow', 1) }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Informações da Empresa -->
+            <div class="status-section">
+                <div class="status-row">
+                    <span class="status-label">🏢 Empresa:</span>
+                    <span class="status-value">{{ item.empresa }}</span>
+                </div>
+            </div>
+
+            <!-- Histórico de Follow-ups -->
+            <div class="follow-ups-timeline">
+                <h3>📋 Histórico de Follow-ups</h3>
+
+                {% for i in range(1, 6) %}
+                <div class="timeline-item">
+                    <div class="timeline-number">{{ i }}</div>
+                    <div class="timeline-content">
+                        {% set desc = item.historico_descricoes['D' + i|string] %}
+                        {% set temp = item.historico_temperaturas['F' + i|string] %}
+
+                        {% if desc %}
+                        {% if 'quente' in temp.lower() %}
+                        <span class="timeline-temperatura temp-quente">🔥 QUENTE</span>
+                        {% elif 'morno' in temp.lower() %}
+                        <span class="timeline-temperatura temp-morno"> MORNO</span>
+                        {% elif 'frio' in temp.lower() %}
+                        <span class="timeline-temperatura temp-frio">❄️ FRIO</span>
+                        {% else %}
+                        <span class="timeline-temperatura temp-vazio">Temperatura: {{ temp or 'Não informada' }}</span>
+                        {% endif %}
+                        <div class="timeline-descricao">{{ desc }}</div>
+                        {% else %}
+                        <div class="timeline-vazio">Follow-up {{ i }} ainda não realizado</div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            <!-- Análise Estratégica da IA -->
+            <div class="analise-box">
+                <div class="analise-title">Plano de Ação Estratégico (IA)</div>
+                <div class="analise-content">{{ item.analise_proximo_passo }}</div>
+            </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+
+    <!-- Botões de Ação Flutuantes -->
+    <div class="action-buttons">
+        {% if responsaveis %}
+        <a href="{{ url_for('index') }}" class="btn-action btn-secondary-action">
+            Nova Análise
+        </a>
+        {% else %}
+        <a href="{{ url_for('gerar_pdf') }}" class="btn-action" target="_blank">
+            Baixar PDF
+        </a>
+        <a href="{{ url_for('index') }}" class="btn-action btn-secondary-action">
+            Voltar
+        </a>
+        {% endif %}
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const filterResp = document.getElementById('filter-responsavel');
+            const filterEmp = document.getElementById('filter-empresa');
+            const cards = document.querySelectorAll('.negocio-card');
+            const totalCount = document.getElementById('total-count');
+
+            function filterCards() {
+                const respValue = filterResp.value.toLowerCase();
+                const empValue = filterEmp.value.toLowerCase();
+                let visibleCount = 0;
+
+                cards.forEach(card => {
+                    const respText = card.querySelector('.badge-resp').textContent.toLowerCase();
+                    const empText = card.querySelector('.status-value').textContent.toLowerCase();
+
+                    const matchesResp = respText.includes(respValue);
+                    const matchesEmp = empText.includes(empValue);
+
+                    if (matchesResp && matchesEmp) {
+                        card.style.display = 'block';
+                        visibleCount++;
+                    } else {
+                        card.style.display = 'none';
+                    }
+                });
+
+                if (totalCount) {
+                    totalCount.textContent = visibleCount;
+                }
+            }
+
+            filterResp.addEventListener('input', filterCards);
+            filterEmp.addEventListener('input', filterCards);
+        });
+    </script>
+</body>
+
+</html>
