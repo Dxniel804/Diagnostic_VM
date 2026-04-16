@@ -132,13 +132,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configurações da API Groq (GRATUITA - Recomendada)
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
-MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
-RETRY_DELAY = int(os.getenv('RETRY_DELAY', '1'))  # Reduzido para 1 segundo
-REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '0.5'))  # Reduzido para 0.5 segundos para maior velocidade
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', '4'))  # Número de threads paralelas
+# Configurações da API Gemini
+GEMINI_API_KEY = os.getenv('VITE_GEMINI_API_KEY')
+GEMINI_MODEL = os.getenv('VITE_GEMINI_MODEL', 'gemini-2.5-flash')
+MAX_RETRIES = int(os.getenv('MAX_RETRIES', '6'))
+RETRY_DELAY = int(os.getenv('RETRY_DELAY', '2'))
+REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '1.0'))
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', '2'))  # Reduzido para evitar sobrecarga da API
 
 # Cache para evitar requisições duplicadas
 cache_analises = {}
@@ -188,17 +188,17 @@ def carregar_knowledge_base():
     else:
         logger.warning("Nenhum conteúdo pôde ser extraído dos PDFs")
 
-if not GROQ_API_KEY:
-    logger.error("GROQ_API_KEY não encontrada nas variáveis de ambiente")
-    raise ValueError("GROQ_API_KEY é obrigatória. Configure no arquivo .env")
+if not GEMINI_API_KEY:
+    logger.error("VITE_GEMINI_API_KEY não encontrada nas variáveis de ambiente")
+    raise ValueError("VITE_GEMINI_API_KEY é obrigatória. Configure no arquivo .env")
 
 # Inicializa o cliente Gemini (novo SDK google-genai 1.x)
 try:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     logger.info(f"Cliente Gemini configurado com sucesso usando modelo: {GEMINI_MODEL}")
 except Exception as e:
-    logger.error(f"Erro ao configurar cliente Groq: {str(e)}")
-    raise ValueError("Não foi possível configurar o cliente Groq. Verifique sua API key.")
+    logger.error(f"Erro ao configurar cliente Gemini: {str(e)}")
+    raise ValueError("Não foi possível configurar o cliente Gemini. Verifique sua API key.")
 
 # Carrega a knowledge base da empresa ao iniciar
 carregar_knowledge_base()
@@ -280,7 +280,7 @@ def identificar_ultimo_followup(dados_negocio):
 
 def pedir_estrategia_ia(dados_negocio):
     """
-    Envia o contexto do negócio para a IA Groq e recebe a estratégia de venda.
+    Envia o contexto do negócio para a IA Gemini e recebe a estratégia de venda.
     A IA age como um Diretor Comercial experiente.
     """
     # Identifica o hash para evitar requisições duplicadas
@@ -331,44 +331,50 @@ REGRA: Papo reto, fluido e estratégico. Proibido introduções tipo "Muito bem.
 
     logger.info(f"Gerando orientação direta e fluida para: {dados_negocio['negocio']} - #{proximo_follow}")
 
-    # Tenta até o limite configurado com backoff exponencial para rate limits
     for tentativa in range(MAX_RETRIES):
         try:
-            # Delay entre requisições para estabilidade
-            if tentativa > 0:
-                delay = RETRY_DELAY * (2 ** (tentativa - 1))
-                logger.warning(f"Aguardando {delay}s antes da tentativa {tentativa + 1}...")
-                time.sleep(delay)
-
             response = gemini_client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
-                    max_output_tokens=4096,  # Equilíbrio entre robustez e brevidade
-                    temperature=0.8,         # Criatividade leve para melhores argumentos
+                    max_output_tokens=4096,
+                    temperature=0.8,
                     top_p=0.95,
                     top_k=40
                 )
             )
-            
+
             resultado = response.text
-            
-            # Se a resposta vier vazia ou muito curta, força um erro para tentar de novo
+
             if not resultado or len(resultado) < 50:
                 raise ValueError("Resposta da IA muito curta ou vazia.")
-            
-            # Salva no cache para uso futuro
+
             cache_analises[hash_cache] = resultado
-            
-            logger.info(f"Orientação gerada com sucesso para {dados_negocio['negocio']}")
+            logger.info(f"Orientação gerada com sucesso para {dados_negocio['negocio']} (tentativa {tentativa + 1})")
             return resultado
-            
+
         except Exception as e:
             error_msg = str(e).lower()
-            logger.error(f"Erro na análise do negócio {dados_negocio['negocio']}: {str(e)}")
+            logger.error(f"Erro na análise do negócio {dados_negocio['negocio']} (tentativa {tentativa + 1}): {str(e)}")
+
             if tentativa == MAX_RETRIES - 1:
-                return f"Erro na análise (IA indisponível): {str(e)}"
-            continue
+                if '503' in error_msg or 'unavailable' in error_msg or 'high demand' in error_msg:
+                    return f"Serviço da IA está sob alta demanda. Tente novamente em alguns minutos. (Erro: {str(e)})"
+                elif 'rate limit' in error_msg or 'too many requests' in error_msg:
+                    return f"Limite de requisições atingido. Aguarde alguns minutos antes de tentar novamente. (Erro: {str(e)})"
+                else:
+                    return f"Erro na análise (IA indisponível): {str(e)}"
+
+            jitter = (tentativa * 3) % 7  # deterministic jitter 0-6s, no random import needed
+            if '503' in error_msg or 'unavailable' in error_msg or 'high demand' in error_msg:
+                delay = 20 * (2 ** tentativa) + jitter  # 20s, 43s, 86s, 169s...
+            elif 'rate limit' in error_msg or 'too many requests' in error_msg:
+                delay = 30 * (2 ** tentativa) + jitter  # 30s, 63s, 126s...
+            else:
+                delay = RETRY_DELAY * (2 ** tentativa) + jitter  # 2s, 7s, 14s...
+
+            logger.warning(f"Aguardando {delay:.1f}s antes da tentativa {tentativa + 2}/{MAX_RETRIES}...")
+            time.sleep(delay)
 
     return "Não foi possível gerar a análise (limite de tentativas excedido)."
 
@@ -1532,94 +1538,101 @@ def gerar_pdf_responsavel(responsavel):
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
         
-        # Estilos
         styles = getSampleStyleSheet()
-        
-        # Estilo do Título Principal
+
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Heading1'],
-            fontSize=24,
-            spaceAfter=30,
-            alignment=1, # Center
-            textColor=VM_GREEN,
-            fontName='Helvetica-Bold'
+            fontSize=26,
+            spaceAfter=0,
+            alignment=0,
+            textColor=colors.white,
+            fontName='Helvetica-Bold',
+            leading=32
         )
-        
-        # Estilo para Nome do Negócio - Visual limpo e direto
         business_style = ParagraphStyle(
             'BusinessTitle',
             parent=styles['Heading2'],
-            fontSize=16,
-            spaceAfter=12,
-            spaceBefore=20,
-            textColor=VM_ORANGE,
+            fontSize=14,
+            spaceAfter=0,
+            spaceBefore=0,
+            textColor=colors.white,
             fontName='Helvetica-Bold',
-            borderWidth=0,
             leading=20
         )
-        
-        # Estilo para Subtítulos (Diagnóstico, Estratégia, etc)
         section_header_style = ParagraphStyle(
             'SectionHeader',
             parent=styles['Heading3'],
-            fontSize=12,
-            spaceAfter=6,
-            spaceBefore=12,
+            fontSize=11,
+            spaceAfter=0,
+            spaceBefore=0,
             textColor=VM_GREEN,
-            fontName='Helvetica-Bold'
+            fontName='Helvetica-Bold',
+            leading=16
         )
-        
-        # Estilo Normal
         normal_style = ParagraphStyle(
             'CustomNormal',
             parent=styles['Normal'],
             fontSize=10,
-            spaceAfter=6,
+            spaceAfter=4,
             leading=14,
             textColor=colors.HexColor('#2c3e50')
         )
-        
-        # Estilo para Labels (Empresa, Responsável, etc)
-        label_style = ParagraphStyle(
-            'LabelStyle',
+        meta_style = ParagraphStyle(
+            'MetaStyle',
             parent=styles['Normal'],
             fontSize=10,
-            textColor=colors.HexColor('#7f8c8d'),
-            leading=14
+            textColor=colors.white,
+            leading=17,
+            alignment=2
         )
 
-        # Conteúdo do PDF
         story = []
-        
-        # Cabeçalho Limpo - Sem fundo verde pesado (como solicitado)
-        header_data = [
-            [Paragraph(f"<font color='{VM_GREEN}'>RELATÓRIO ESTRATÉGICO</font>", 
-                       ParagraphStyle('HeaderTitle', parent=title_style, fontSize=22, alignment=0, spaceAfter=0)),
-             Paragraph(f"<b>Vendedor:</b> {responsavel}<br/><b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}", 
-                       ParagraphStyle('HeaderInfo', parent=normal_style, textColor=colors.gray, alignment=2, leading=14))]
-        ]
-        header_table = Table(header_data, colWidths=[4.2*inch, 2.8*inch])
+
+        # Banner principal — fundo verde escuro
+        header_table = Table(
+            [[Paragraph('RELATÓRIO ESTRATÉGICO', title_style),
+              Paragraph(f"<b>Vendedor:</b> {responsavel}<br/><b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}", meta_style)]],
+            colWidths=[4.4*inch, 2.6*inch]
+        )
         header_table.setStyle(TableStyle([
-            ('ALIGN', (0, 0), (0, 0), 'LEFT'),
-            ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
-            ('VALIGN', (0, 0), (-1, -1), 'BOTTOM'),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
-            ('LINEBELOW', (0, 0), (-1, -1), 1, VM_GREEN), # Linha sutil verde apenas embaixo
+            ('BACKGROUND', (0, 0), (-1, -1), VM_GREEN),
+            ('TOPPADDING', (0, 0), (-1, -1), 22),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 22),
+            ('LEFTPADDING', (0, 0), (0, 0), 22),
+            ('RIGHTPADDING', (1, 0), (1, 0), 22),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         story.append(header_table)
-        story.append(Spacer(1, 25))
-        story.append(Spacer(1, 30))
+
+        # Barra laranja decorativa
+        accent_bar = Table([['']], colWidths=[7*inch])
+        accent_bar.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), VM_ORANGE),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        story.append(accent_bar)
+        story.append(Spacer(1, 22))
         
         # Análises detalhadas
         for i, item in enumerate(dados_responsavel, 1):
             # Container para manter o bloco junto se possível
             elements = []
             
-            # Cabeçalho do Cliente
-            elements.append(Paragraph(f"{i}. {item['negocio']}", business_style))
-            
-            # Dados principais em tabela para organização
+            # Título do negócio — barra laranja
+            title_bar = Table([[Paragraph(f"{i}. {item['negocio']}", business_style)]], colWidths=[7*inch])
+            title_bar.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), VM_ORANGE),
+                ('TOPPADDING', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ('LEFTPADDING', (0, 0), (-1, -1), 14),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 14),
+            ]))
+            elements.append(title_bar)
+            elements.append(Spacer(1, 8))
+
+            # Dados principais
             data = [
                 [Paragraph(f"<b>Empresa:</b> {item['empresa']}", normal_style),
                  Paragraph(f"<b>Fase:</b> {item['fase']}", normal_style)],
@@ -1628,83 +1641,62 @@ def gerar_pdf_responsavel(responsavel):
                 [Paragraph(f"<b>Próximo Passo:</b> #{item.get('proximo_follow', 1)}", normal_style),
                  Paragraph("", normal_style)]
             ]
-            
             t = Table(data, colWidths=[3.5*inch, 3.5*inch])
             t.setStyle(TableStyle([
-                ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                ('TOPPADDING', (0,0), (-1,-1), 2),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+                ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+                ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#d0d0d0')),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ('LEFTPADDING', (0, 0), (-1, -1), 8),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ]))
             elements.append(t)
             elements.append(Spacer(1, 10))
-            
-            # Processamento da Análise da IA
+
+            # Análise da IA
             analise_text = item.get('analise_proximo_passo', '')
-            
-            # Divide o texto em linhas para processar
-            lines = analise_text.split('\n')
-            sections_added = set() # Controle de duplicidade
-            
-            for line in lines:
-                line_plain = line.replace('*', '').strip()
-                if not line_plain: continue
-                
-                line_upper = line_plain.upper()
-                
-                # Verifica se é um cabeçalho de seção - Lógica mais rigorosa para evitar duplicados
-                if 'SITUAÇÃO' in line_upper and 'SIT' not in sections_added:
-                    elements.append(Paragraph("🔍 SITUAÇÃO", section_header_style))
-                    sections_added.add('SIT')
-                elif 'MENSAGEM' in line_upper and 'MSG' not in sections_added:
-                    elements.append(Paragraph("💬 MENSAGEM RECOMENDADA", section_header_style))
-                    sections_added.add('MSG')
-                elif ('PRÓXIMO PASSO' in line_upper or 'META' in line_upper) and 'PROX' not in sections_added:
-                    elements.append(Paragraph("🎯 PRÓXIMO PASSO & META", section_header_style))
-                    sections_added.add('PROX')
-                elif any(kw in line_upper for kw in ['SITUAÇÃO', 'MENSAGEM', 'PRÓXIMO PASSO', 'META']):
-                    # Se já adicionou o cabeçalho, ignora a linha que repete o nome da seção
-                    continue
-                else:
-                    # Conteúdo normal
+            if analise_text.strip():
+                section_bar = Table([[Paragraph('ANÁLISE ESTRATÉGICA', section_header_style)]], colWidths=[7*inch])
+                section_bar.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f0f7f0')),
+                    ('LINEBEFORE', (0, 0), (0, -1), 4, VM_GREEN),
+                    ('TOPPADDING', (0, 0), (-1, -1), 7),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 12),
+                ]))
+                elements.append(section_bar)
+                elements.append(Spacer(1, 6))
+                for line in analise_text.split('\n'):
                     clean_line = line.replace('**', '').strip()
-                    if clean_line.startswith('-') or clean_line.startswith('•'):
-                        texto_limpo = clean_line[1:].strip()
-                        if texto_limpo:
-                            elements.append(Paragraph(f"• {texto_limpo}", normal_style))
-                    else:
+                    if clean_line:
                         elements.append(Paragraph(clean_line, normal_style))
-            
+
             elements.append(Spacer(1, 15))
-            
-            # Adiciona ao story (tenta manter junto)
             story.append(KeepTogether(elements))
-            
-            # Linha divisória sutil
+
             if i < total:
-                story.append(Spacer(1, 10))
-                story.append(Table([[Spacer(1, 1)]], colWidths=[7*inch], 
-                                  style=[('LINEABOVE', (0,0), (-1,-1), 0.5, colors.HexColor('#e0e0e0'))]))
-                story.append(Spacer(1, 20))
-        
-        # Rodapé
+                story.append(Spacer(1, 8))
+                story.append(Table([['']], colWidths=[7*inch],
+                                  style=[('LINEABOVE', (0, 0), (-1, -1), 1.5, VM_ORANGE)]))
+                story.append(Spacer(1, 16))
+
         story.append(Spacer(1, 30))
-        story.append(Paragraph(f"Relatório individual gerado para: <b>{responsavel}</b>", 
+        story.append(Paragraph(f"Relatório individual gerado para: <b>{responsavel}</b>",
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
-        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.", 
+        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.",
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
-        
-        # Gera o PDF
+
         doc.build(story)
         buffer.seek(0)
-        
-        # Prepara resposta
+
         response = make_response(buffer.getvalue())
         response.headers['Content-Type'] = 'application/pdf'
         response.headers['Content-Disposition'] = f'inline; filename=relatorio_{responsavel.replace(" ", "_")}_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
-        
+
         logger.info(f"PDF individual gerado com sucesso para {responsavel}: {total} itens")
         return response
-        
+
     except Exception as e:
         logger.error(f"Erro ao gerar PDF individual: {str(e)}")
         flash(f'Erro ao gerar PDF individual: {str(e)}', 'error')
@@ -1774,96 +1766,101 @@ def gerar_pdf():
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=50, leftMargin=50, topMargin=50, bottomMargin=50)
         
-        # Estilos
         styles = getSampleStyleSheet()
-        
-        # Estilo do Título Principal
+
         title_style = ParagraphStyle(
             'CustomTitle',
             parent=styles['Heading1'],
-            fontSize=24,
-            spaceAfter=30,
-            alignment=1, # Center
-            textColor=VM_GREEN,
-            fontName='Helvetica-Bold'
+            fontSize=26,
+            spaceAfter=0,
+            alignment=0,
+            textColor=colors.white,
+            fontName='Helvetica-Bold',
+            leading=32
         )
-        
-        # Estilo para Nome do Negócio
         business_style = ParagraphStyle(
             'BusinessTitle',
             parent=styles['Heading2'],
-            fontSize=16,
-            spaceAfter=10,
-            spaceBefore=20,
-            textColor=VM_ORANGE,
+            fontSize=14,
+            spaceAfter=0,
+            spaceBefore=0,
+            textColor=colors.white,
             fontName='Helvetica-Bold',
-            borderPadding=5,
-            borderColor=VM_GREEN,
-            borderWidth=0,
-            backColor=colors.Color(0.95, 0.95, 0.95) # Fundo cinza claro
+            leading=20
         )
-        
-        # Estilo para Subtítulos (Diagnóstico, Estratégia, etc)
         section_header_style = ParagraphStyle(
             'SectionHeader',
             parent=styles['Heading3'],
-            fontSize=12,
-            spaceAfter=6,
-            spaceBefore=12,
+            fontSize=11,
+            spaceAfter=0,
+            spaceBefore=0,
             textColor=VM_GREEN,
-            fontName='Helvetica-Bold'
+            fontName='Helvetica-Bold',
+            leading=16
         )
-        
-        # Estilo Normal
         normal_style = ParagraphStyle(
             'CustomNormal',
             parent=styles['Normal'],
             fontSize=10,
-            spaceAfter=6,
+            spaceAfter=4,
             leading=14,
             textColor=colors.HexColor('#2c3e50')
         )
-        
-        # Estilo para Labels (Empresa, Responsável, etc)
-        label_style = ParagraphStyle(
-            'LabelStyle',
+        meta_style = ParagraphStyle(
+            'MetaStyle',
             parent=styles['Normal'],
             fontSize=10,
-            textColor=colors.HexColor('#7f8c8d'),
-            leading=14
+            textColor=colors.white,
+            leading=17,
+            alignment=2
         )
 
-        # Conteúdo do PDF
         story = []
-        
-        # Cabeçalho Limpo - Sem fundo verde pesado
-        header_data = [
-            [Paragraph(f"<font color='{VM_GREEN}'>RELATÓRIO ESTRATÉGICO GERAL</font>", 
-                       ParagraphStyle('HeaderTitle', parent=title_style, fontSize=20, alignment=0, spaceAfter=0)),
-             Paragraph(f"<b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}<br/><b>Total:</b> {total} análises", 
-                       ParagraphStyle('HeaderInfo', parent=normal_style, textColor=colors.gray, alignment=2, leading=14))]
-        ]
-        header_table = Table(header_data, colWidths=[4.2*inch, 2.8*inch])
+
+        # Banner principal — fundo verde escuro
+        header_table = Table(
+            [[Paragraph('RELATÓRIO ESTRATÉGICO GERAL', title_style),
+              Paragraph(f"<b>Data:</b> {datetime.now().strftime('%d/%m/%Y')}<br/><b>Total:</b> {total} análises", meta_style)]],
+            colWidths=[4.4*inch, 2.6*inch]
+        )
         header_table.setStyle(TableStyle([
-            ('ALIGN', (0, 0), (0, 0), 'LEFT'),
-            ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
-            ('VALIGN', (0, 0), (-1, -1), 'BOTTOM'),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
-            ('LINEBELOW', (0, 0), (-1, -1), 1, VM_GREEN), # Linha sutil verde apenas embaixo
+            ('BACKGROUND', (0, 0), (-1, -1), VM_GREEN),
+            ('TOPPADDING', (0, 0), (-1, -1), 22),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 22),
+            ('LEFTPADDING', (0, 0), (0, 0), 22),
+            ('RIGHTPADDING', (1, 0), (1, 0), 22),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         story.append(header_table)
-        story.append(Spacer(1, 25))
-        story.append(Spacer(1, 30))
+
+        # Barra laranja decorativa
+        accent_bar = Table([['']], colWidths=[7*inch])
+        accent_bar.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), VM_ORANGE),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        story.append(accent_bar)
+        story.append(Spacer(1, 22))
         
         # Análises detalhadas
         for i, item in enumerate(relatorio_final, 1):
             # Container para manter o bloco junto se possível
             elements = []
             
-            # Cabeçalho do Cliente
-            elements.append(Paragraph(f"{i}. {item['negocio']}", business_style))
-            
-            # Dados principais em tabela para organização
+            # Título do negócio — barra laranja
+            title_bar = Table([[Paragraph(f"{i}. {item['negocio']}", business_style)]], colWidths=[7*inch])
+            title_bar.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), VM_ORANGE),
+                ('TOPPADDING', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+                ('LEFTPADDING', (0, 0), (-1, -1), 14),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 14),
+            ]))
+            elements.append(title_bar)
+            elements.append(Spacer(1, 8))
+
+            # Dados principais
             data = [
                 [Paragraph(f"<b>Empresa:</b> {item['empresa']}", normal_style),
                  Paragraph(f"<b>Responsável:</b> {item['responsavel']}", normal_style)],
@@ -1872,81 +1869,60 @@ def gerar_pdf():
                 [Paragraph(f"<b>Último Follow-up:</b> #{item.get('ultimo_follow', 0)}", normal_style),
                  Paragraph(f"<b>Próximo Passo:</b> #{item.get('proximo_follow', 1)}", normal_style)]
             ]
-            
             t = Table(data, colWidths=[3.5*inch, 3.5*inch])
             t.setStyle(TableStyle([
-                ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                ('TOPPADDING', (0,0), (-1,-1), 2),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+                ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+                ('GRID', (0, 0), (-1, -1), 0.3, colors.HexColor('#d0d0d0')),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                ('LEFTPADDING', (0, 0), (-1, -1), 8),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ]))
             elements.append(t)
             elements.append(Spacer(1, 10))
-            
-            # Processamento da Análise da IA
+
+            # Análise da IA
             analise_text = item.get('analise_proximo_passo', '')
-            
-            # Divide o texto em linhas para processar
-            lines = analise_text.split('\n')
-            sections_added = set() # Controle de duplicidade
-            
-            for line in lines:
-                line_plain = line.replace('*', '').strip()
-                if not line_plain: continue
-                
-                line_upper = line_plain.upper()
-                
-                # Verifica se é um cabeçalho de seção - Lógica mais rigorosa para evitar duplicados
-                if 'SITUAÇÃO' in line_upper and 'SIT' not in sections_added:
-                    elements.append(Paragraph("🔍 SITUAÇÃO", section_header_style))
-                    sections_added.add('SIT')
-                elif 'MENSAGEM' in line_upper and 'MSG' not in sections_added:
-                    elements.append(Paragraph("💬 MENSAGEM RECOMENDADA", section_header_style))
-                    sections_added.add('MSG')
-                elif ('PRÓXIMO PASSO' in line_upper or 'META' in line_upper) and 'PROX' not in sections_added:
-                    elements.append(Paragraph("🎯 PRÓXIMO PASSO & META", section_header_style))
-                    sections_added.add('PROX')
-                elif any(kw in line_upper for kw in ['SITUAÇÃO', 'MENSAGEM', 'PRÓXIMO PASSO', 'META']):
-                    # Se já adicionou o cabeçalho, ignora a linha que repete o nome da seção
-                    continue
-                else:
-                    # Conteúdo normal
+            if analise_text.strip():
+                section_bar = Table([[Paragraph('ANÁLISE ESTRATÉGICA', section_header_style)]], colWidths=[7*inch])
+                section_bar.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f0f7f0')),
+                    ('LINEBEFORE', (0, 0), (0, -1), 4, VM_GREEN),
+                    ('TOPPADDING', (0, 0), (-1, -1), 7),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 12),
+                ]))
+                elements.append(section_bar)
+                elements.append(Spacer(1, 6))
+                for line in analise_text.split('\n'):
                     clean_line = line.replace('**', '').strip()
-                    if clean_line.startswith('-') or clean_line.startswith('•'):
-                        texto_limpo = clean_line[1:].strip()
-                        if texto_limpo:
-                            elements.append(Paragraph(f"• {texto_limpo}", normal_style))
-                    else:
+                    if clean_line:
                         elements.append(Paragraph(clean_line, normal_style))
-            
+
             elements.append(Spacer(1, 15))
-            
-            # Adiciona ao story (tenta manter junto)
             story.append(KeepTogether(elements))
-            
-            # Linha divisória sutil
+
             if i < total:
-                story.append(Spacer(1, 10))
-                story.append(Table([[Spacer(1, 1)]], colWidths=[7*inch], 
-                                  style=[('LINEABOVE', (0,0), (-1,-1), 0.5, colors.HexColor('#e0e0e0'))]))
-                story.append(Spacer(1, 20))
-        
-        # Rodapé
+                story.append(Spacer(1, 8))
+                story.append(Table([['']], colWidths=[7*inch],
+                                  style=[('LINEABOVE', (0, 0), (-1, -1), 1.5, VM_ORANGE)]))
+                story.append(Spacer(1, 16))
+
         story.append(Spacer(1, 30))
-        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.", 
+        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.",
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
-        
-        # Gera o PDF
+
         doc.build(story)
         buffer.seek(0)
-        
-        # Prepara resposta
+
         response = make_response(buffer.getvalue())
         response.headers['Content-Type'] = 'application/pdf'
         response.headers['Content-Disposition'] = f'inline; filename=relatorio_estrategico_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
-        
+
         logger.info(f"PDF gerado com sucesso: {total} itens")
         return response
-        
+
     except Exception as e:
         logger.error(f"Erro ao gerar PDF: {str(e)}")
         flash(f'Erro ao gerar PDF: {str(e)}', 'error')
@@ -1992,5 +1968,5 @@ if __name__ == '__main__':
     debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
     
     logger.info(f"Iniciando servidor Flask na porta {port} (debug={debug})")
-    logger.info(f"Usando API Groq com modelo: {GROQ_MODEL}")
+    logger.info(f"Usando API Gemini com modelo: {GEMINI_MODEL}")
     app.run(debug=debug, port=port)
