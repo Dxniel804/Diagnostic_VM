@@ -24,6 +24,7 @@ import json
 import pickle
 from PyPDF2 import PdfReader
 import threading
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Cores da Vendamais
@@ -135,6 +136,13 @@ logger = logging.getLogger(__name__)
 # Configurações da API Gemini
 GEMINI_API_KEY = os.getenv('VITE_GEMINI_API_KEY')
 GEMINI_MODEL = os.getenv('VITE_GEMINI_MODEL', 'gemini-2.5-flash')
+# Fallback models tried in order when primary returns 503 or 404
+GEMINI_FALLBACK_MODELS = [
+    GEMINI_MODEL,
+    'gemini-2.5-flash',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+]
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', '6'))
 RETRY_DELAY = int(os.getenv('RETRY_DELAY', '2'))
 REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '1.0'))
@@ -278,6 +286,120 @@ def identificar_ultimo_followup(dados_negocio):
     return ultimo_follow, proximo_follow, temperatura_atual
 
 
+def _formatar_analise_pdf(analise_text, elements, normal_style):
+    """Renders AI analysis markdown to ReportLab elements with colored section headers"""
+    section_style = ParagraphStyle(
+        'AnaliseSection',
+        parent=normal_style,
+        fontSize=11,
+        fontName='Helvetica-Bold',
+        textColor=colors.white,
+    )
+    body_style = ParagraphStyle(
+        'AnaliseBody',
+        parent=normal_style,
+        fontSize=9,
+        leading=14,
+        spaceBefore=3,
+        spaceAfter=3,
+        textColor=colors.HexColor('#2c3e50'),
+    )
+    quote_style = ParagraphStyle(
+        'AnaliseQuote',
+        parent=normal_style,
+        fontSize=9,
+        leading=14,
+        leftIndent=12,
+        textColor=colors.HexColor('#34495e'),
+        backColor=colors.HexColor('#f9f9f9'),
+    )
+
+    def make_header(title_text, bg_color):
+        bar = Table(
+            [[Paragraph(f"<b>{title_text.upper()}</b>", section_style)]],
+            colWidths=[7*inch]
+        )
+        bar.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), bg_color),
+            ('TOPPADDING', (0, 0), (-1, -1), 7),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+            ('LEFTPADDING', (0, 0), (-1, -1), 14),
+            ('ROUNDEDCORNERS', [4, 4, 4, 4]),
+        ]))
+        return bar
+
+    # Color cycling for ### headers
+    header_colors = [VM_GREEN, colors.HexColor('#1a6ca8'), VM_ORANGE, colors.HexColor('#7d3c98')]
+    header_color_idx = [0]
+
+    lines = analise_text.split('\n')
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        i += 1
+
+        if not stripped:
+            elements.append(Spacer(1, 4))
+            continue
+
+        # ### Markdown headers
+        m_hash = re.match(r'^#{1,3}\s*(.*)', stripped)
+        if m_hash:
+            title = re.sub(r'\*\*(.*?)\*\*', r'\1', m_hash.group(1)).strip().rstrip(':')
+            bg = header_colors[header_color_idx[0] % len(header_colors)]
+            header_color_idx[0] += 1
+            elements.append(Spacer(1, 8))
+            elements.append(make_header(title, bg))
+            elements.append(Spacer(1, 4))
+            continue
+
+        # Numbered headers: "1. **TÍTULO:**"
+        m_num = re.match(r'^(\d+)\.\s*\*\*(.*?)\*\*:?\s*(.*)', stripped)
+        if m_num:
+            num, title, rest = m_num.group(1), m_num.group(2), m_num.group(3).strip()
+            bg = header_colors[header_color_idx[0] % len(header_colors)]
+            header_color_idx[0] += 1
+            elements.append(Spacer(1, 8))
+            elements.append(make_header(f"{num}. {title}", bg))
+            elements.append(Spacer(1, 4))
+            if rest:
+                rest_fmt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', rest)
+                elements.append(Paragraph(rest_fmt, body_style))
+            continue
+
+        # Bold-only line (standalone label like "**Assunto:**")
+        m_bold_label = re.match(r'^\*\*(.*?)\*\*:?\s*(.*)', stripped)
+        if m_bold_label:
+            label = m_bold_label.group(1).strip()
+            rest = m_bold_label.group(2).strip()
+            label_style = ParagraphStyle(
+                'BoldLabel', parent=body_style,
+                textColor=VM_GREEN, fontName='Helvetica-Bold', fontSize=9,
+            )
+            elements.append(Spacer(1, 5))
+            if rest:
+                elements.append(Paragraph(f"<b>{label}:</b> {re.sub(r'[*_]', '', rest)}", body_style))
+            else:
+                elements.append(Paragraph(f"<b>{label}</b>", label_style))
+            continue
+
+        # Bullet / list items
+        if stripped.startswith(('-', '*', '•')):
+            content = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', stripped[1:].strip())
+            bullet_style = ParagraphStyle(
+                'Bullet', parent=body_style,
+                leftIndent=16, firstLineIndent=-8,
+                bulletText='•',
+            )
+            elements.append(Paragraph(content, bullet_style))
+            continue
+
+        # Plain text
+        formatted = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', stripped)
+        formatted = re.sub(r'\*(.*?)\*', r'<i>\1</i>', formatted)
+        elements.append(Paragraph(formatted, body_style))
+
+
 def pedir_estrategia_ia(dados_negocio):
     """
     Envia o contexto do negócio para a IA Gemini e recebe a estratégia de venda.
@@ -331,10 +453,12 @@ REGRA: Papo reto, fluido e estratégico. Proibido introduções tipo "Muito bem.
 
     logger.info(f"Gerando orientação direta e fluida para: {dados_negocio['negocio']} - #{proximo_follow}")
 
+    model_index = 0
     for tentativa in range(MAX_RETRIES):
+        modelo_atual = GEMINI_FALLBACK_MODELS[model_index % len(GEMINI_FALLBACK_MODELS)]
         try:
             response = gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=modelo_atual,
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
                     max_output_tokens=4096,
@@ -350,12 +474,12 @@ REGRA: Papo reto, fluido e estratégico. Proibido introduções tipo "Muito bem.
                 raise ValueError("Resposta da IA muito curta ou vazia.")
 
             cache_analises[hash_cache] = resultado
-            logger.info(f"Orientação gerada com sucesso para {dados_negocio['negocio']} (tentativa {tentativa + 1})")
+            logger.info(f"Orientação gerada com sucesso para {dados_negocio['negocio']} (tentativa {tentativa + 1}, modelo: {modelo_atual})")
             return resultado
 
         except Exception as e:
             error_msg = str(e).lower()
-            logger.error(f"Erro na análise do negócio {dados_negocio['negocio']} (tentativa {tentativa + 1}): {str(e)}")
+            logger.error(f"Erro na análise do negócio {dados_negocio['negocio']} (tentativa {tentativa + 1}, modelo: {modelo_atual}): {str(e)}")
 
             if tentativa == MAX_RETRIES - 1:
                 if '503' in error_msg or 'unavailable' in error_msg or 'high demand' in error_msg:
@@ -365,15 +489,22 @@ REGRA: Papo reto, fluido e estratégico. Proibido introduções tipo "Muito bem.
                 else:
                     return f"Erro na análise (IA indisponível): {str(e)}"
 
-            jitter = (tentativa * 3) % 7  # deterministic jitter 0-6s, no random import needed
-            if '503' in error_msg or 'unavailable' in error_msg or 'high demand' in error_msg:
-                delay = 20 * (2 ** tentativa) + jitter  # 20s, 43s, 86s, 169s...
+            jitter = (tentativa * 3) % 7
+            is_model_unavailable = ('503' in error_msg or 'unavailable' in error_msg or
+                                    'high demand' in error_msg or '404' in error_msg or
+                                    'not_found' in error_msg or 'no longer available' in error_msg)
+            if is_model_unavailable:
+                # Rotate to next fallback model immediately, short delay
+                model_index += 1
+                proximo_modelo = GEMINI_FALLBACK_MODELS[model_index % len(GEMINI_FALLBACK_MODELS)]
+                delay = 3 + jitter
+                logger.warning(f"Modelo {modelo_atual} indisponível. Trocando para {proximo_modelo}. Aguardando {delay:.1f}s...")
             elif 'rate limit' in error_msg or 'too many requests' in error_msg:
-                delay = 30 * (2 ** tentativa) + jitter  # 30s, 63s, 126s...
+                delay = 30 * (2 ** tentativa) + jitter
+                logger.warning(f"Rate limit. Aguardando {delay:.1f}s antes da tentativa {tentativa + 2}/{MAX_RETRIES}...")
             else:
-                delay = RETRY_DELAY * (2 ** tentativa) + jitter  # 2s, 7s, 14s...
-
-            logger.warning(f"Aguardando {delay:.1f}s antes da tentativa {tentativa + 2}/{MAX_RETRIES}...")
+                delay = RETRY_DELAY * (2 ** tentativa) + jitter
+                logger.warning(f"Aguardando {delay:.1f}s antes da tentativa {tentativa + 2}/{MAX_RETRIES}...")
             time.sleep(delay)
 
     return "Não foi possível gerar a análise (limite de tentativas excedido)."
@@ -1666,11 +1797,8 @@ def gerar_pdf_responsavel(responsavel):
                     ('LEFTPADDING', (0, 0), (-1, -1), 12),
                 ]))
                 elements.append(section_bar)
-                elements.append(Spacer(1, 6))
-                for line in analise_text.split('\n'):
-                    clean_line = line.replace('**', '').strip()
-                    if clean_line:
-                        elements.append(Paragraph(clean_line, normal_style))
+                elements.append(Spacer(1, 4))
+                _formatar_analise_pdf(analise_text, elements, normal_style)
 
             elements.append(Spacer(1, 15))
             story.append(KeepTogether(elements))
@@ -1758,7 +1886,15 @@ def gerar_pdf():
             logger.error(f"Session data: {dict(session)}")
             flash('Dados do relatório não encontrados. Por favor, processe a planilha novamente.', 'error')
             return redirect(url_for('index'))
-        
+
+        # Unwrap new dict cache format {'relatorio_final': [...], 'relatorio_agrupado': {...}}
+        if isinstance(relatorio_final, dict):
+            relatorio_final = relatorio_final.get('relatorio_final', [])
+
+        if not relatorio_final:
+            flash('Dados do relatório não encontrados. Por favor, processe a planilha novamente.', 'error')
+            return redirect(url_for('index'))
+
         total = len(relatorio_final)
         logger.info(f"Gerando PDF para {total} itens")
         
@@ -1894,11 +2030,8 @@ def gerar_pdf():
                     ('LEFTPADDING', (0, 0), (-1, -1), 12),
                 ]))
                 elements.append(section_bar)
-                elements.append(Spacer(1, 6))
-                for line in analise_text.split('\n'):
-                    clean_line = line.replace('**', '').strip()
-                    if clean_line:
-                        elements.append(Paragraph(clean_line, normal_style))
+                elements.append(Spacer(1, 4))
+                _formatar_analise_pdf(analise_text, elements, normal_style)
 
             elements.append(Spacer(1, 15))
             story.append(KeepTogether(elements))
