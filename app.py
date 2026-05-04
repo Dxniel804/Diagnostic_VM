@@ -5,6 +5,7 @@ Automação que lê planilhas Excel e gera estratégias personalizadas usando IA
 
 import os
 import time
+import random
 import logging
 import hashlib
 import pandas as pd
@@ -121,22 +122,27 @@ def limpar_cache_antigo():
     except Exception as e:
         logger.error(f"Erro ao limpar cache antigo: {str(e)}")
 
+import sys
+
 # Configuração de logging
+_stream_handler = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True))
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('app.log'),
-        logging.StreamHandler()
+        logging.FileHandler('app.log', encoding='utf-8'),
+        _stream_handler,
     ]
 )
 logger = logging.getLogger(__name__)
 
-# Configurações da API Groq (GRATUITA - Recomendada)
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
-MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
-RETRY_DELAY = int(os.getenv('RETRY_DELAY', '1'))  # Reduzido para 1 segundo
+# Configurações da API Gemini
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')
+GEMINI_FALLBACK_MODEL = os.getenv('GEMINI_FALLBACK_MODEL', 'gemini-2.5-flash-lite')
+GEMINI_FALLBACK_MODEL_2 = os.getenv('GEMINI_FALLBACK_MODEL_2', 'gemini-2.0-flash-lite')
+MAX_RETRIES = int(os.getenv('MAX_RETRIES', '5'))
+RETRY_DELAY = int(os.getenv('RETRY_DELAY', '5'))
 REQUEST_DELAY = float(os.getenv('REQUEST_DELAY', '0.5'))  # Reduzido para 0.5 segundos para maior velocidade
 MAX_WORKERS = int(os.getenv('MAX_WORKERS', '4'))  # Número de threads paralelas
 
@@ -185,20 +191,20 @@ def carregar_knowledge_base():
     
     if knowledge_base_text:
         logger.info(f"Knowledge base carregada com sucesso ({len(knowledge_base_text)} caracteres)")
-    else:
+    else:   
         logger.warning("Nenhum conteúdo pôde ser extraído dos PDFs")
 
-if not GROQ_API_KEY:
-    logger.error("GROQ_API_KEY não encontrada nas variáveis de ambiente")
-    raise ValueError("GROQ_API_KEY é obrigatória. Configure no arquivo .env")
+if not GEMINI_API_KEY:
+    logger.error("GEMINI_API_KEY não encontrada nas variáveis de ambiente")
+    raise ValueError("GEMINI_API_KEY é obrigatória. Configure no arquivo .env")
 
 # Inicializa o cliente Gemini (novo SDK google-genai 1.x)
 try:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY, http_options={'api_version': 'v1alpha'})
     logger.info(f"Cliente Gemini configurado com sucesso usando modelo: {GEMINI_MODEL}")
 except Exception as e:
-    logger.error(f"Erro ao configurar cliente Groq: {str(e)}")
-    raise ValueError("Não foi possível configurar o cliente Groq. Verifique sua API key.")
+    logger.error(f"Erro ao configurar cliente Gemini: {str(e)}")
+    raise ValueError("Não foi possível configurar o cliente Gemini. Verifique sua API key.")
 
 # Carrega a knowledge base da empresa ao iniciar
 carregar_knowledge_base()
@@ -280,7 +286,7 @@ def identificar_ultimo_followup(dados_negocio):
 
 def pedir_estrategia_ia(dados_negocio):
     """
-    Envia o contexto do negócio para a IA Groq e recebe a estratégia de venda.
+    Envia o contexto do negócio para a IA Gemini e recebe a estratégia de venda.
     A IA age como um Diretor Comercial experiente.
     """
     # Identifica o hash para evitar requisições duplicadas
@@ -322,26 +328,35 @@ CONTEXTO:
 
 HISTÓRICO: {historico_texto if historico_texto else 'Primeiro contato agora.'}
 
-ESTRUTURA (SEJA DIRETO E USE LINGUAGEM HUMANA, SEM JARGÕES PESADOS):
+ESTRUTURA OBRIGATÓRIA (use EXATAMENTE esses cabeçalhos em negrito, nessa ordem, sem pular nenhum):
 1. **SITUAÇÃO:** O que está rolando? Explique o cenário e a indecisão do cliente (visão JOLT) de forma bem natural, como uma conversa.
 2. **MENSAGEM RECOMENDADA:** Um texto pronto que soe humano (WhatsApp/Email). Nada de "prezado" ou "venho por meio desta". Seja persuasivo, dê uma recomendação clara e tire o medo dele de decidir.
 3. **PRÓXIMO PASSO:** Qual o jogo aqui? Define a meta pra avançar e matar a inércia.
 
-REGRA: Papo reto, fluido e estratégico. Proibido introduções tipo "Muito bem...", "Com base no histórico..." ou "Prezado vendedor". Vai direto ao ponto com autoridade, mas sem formalismo excessivo."""
+REGRA: Papo reto, fluido e estratégico. Proibido introduções tipo "Muito bem...", "Com base no histórico..." ou "Prezado vendedor". Vai direto ao ponto com autoridade, mas sem formalismo excessivo. OBRIGATÓRIO incluir as 3 seções sempre."""
 
     logger.info(f"Gerando orientação direta e fluida para: {dados_negocio['negocio']} - #{proximo_follow}")
 
     # Tenta até o limite configurado com backoff exponencial para rate limits
+    # Ao trocar de modelo não há delay — backoff só se aplica a retentativas no mesmo modelo
+    fallback_level = 0  # 0=primary, 1=fallback, 2=fallback_2
+    retry_no_modelo = 0  # quantas vezes tentou o modelo atual
+    MODELOS = [GEMINI_MODEL, GEMINI_FALLBACK_MODEL, GEMINI_FALLBACK_MODEL_2]
     for tentativa in range(MAX_RETRIES):
         try:
-            # Delay entre requisições para estabilidade
-            if tentativa > 0:
-                delay = RETRY_DELAY * (2 ** (tentativa - 1))
-                logger.warning(f"Aguardando {delay}s antes da tentativa {tentativa + 1}...")
+            # Delay apenas quando retenta o MESMO modelo (não na troca)
+            if retry_no_modelo > 0:
+                delay = RETRY_DELAY * (2 ** (retry_no_modelo - 1))
+                jitter = random.uniform(0, delay * 0.3)
+                delay = delay + jitter
+                logger.warning(f"Aguardando {delay:.1f}s antes da tentativa {tentativa + 1} (modelo: {MODELOS[fallback_level]})...")
                 time.sleep(delay)
 
+            retry_no_modelo += 1
+            modelo_atual = MODELOS[fallback_level]
+
             response = gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=modelo_atual,
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
                     max_output_tokens=4096,  # Equilíbrio entre robustez e brevidade
@@ -350,24 +365,36 @@ REGRA: Papo reto, fluido e estratégico. Proibido introduções tipo "Muito bem.
                     top_k=40
                 )
             )
-            
+
             resultado = response.text
-            
+
             # Se a resposta vier vazia ou muito curta, força um erro para tentar de novo
             if not resultado or len(resultado) < 50:
                 raise ValueError("Resposta da IA muito curta ou vazia.")
-            
+
             # Salva no cache para uso futuro
             cache_analises[hash_cache] = resultado
-            
-            logger.info(f"Orientação gerada com sucesso para {dados_negocio['negocio']}")
+
+            logger.info(f"Orientação gerada com sucesso para {dados_negocio['negocio']} (modelo: {modelo_atual})")
             return resultado
-            
+
         except Exception as e:
-            error_msg = str(e).lower()
-            logger.error(f"Erro na análise do negócio {dados_negocio['negocio']}: {str(e)}")
+            error_str = str(e)
+            should_escalate = (
+                '503' in error_str or
+                'UNAVAILABLE' in error_str or
+                'high demand' in error_str.lower() or
+                '404' in error_str or
+                'NOT_FOUND' in error_str or
+                'no longer available' in error_str.lower()
+            )
+            logger.error(f"Erro na análise do negócio {dados_negocio['negocio']}: {error_str}")
             if tentativa == MAX_RETRIES - 1:
-                return f"Erro na análise (IA indisponível): {str(e)}"
+                return f"Erro na análise (IA indisponível): {error_str}"
+            if should_escalate and fallback_level < len(MODELOS) - 1:
+                fallback_level += 1
+                retry_no_modelo = 0  # reseta contador — próxima tentativa no novo modelo sem delay
+                logger.warning(f"503 detectado — alternando para modelo fallback nível {fallback_level}: {MODELOS[fallback_level]}")
             continue
 
     return "Não foi possível gerar a análise (limite de tentativas excedido)."
@@ -971,8 +998,202 @@ def ler_planilha_excel(file_path, filename):
 
 @app.route('/')
 def index():
-    """Página inicial com formulário de upload"""
-    return render_template('index.html')
+    """Página inicial com formulário de upload e relatórios recentes"""
+    try:
+        # Lista relatórios recentes do cache
+        relatorios_recentes = []
+        if os.path.exists(CACHE_DIR):
+            cache_files = [f for f in os.listdir(CACHE_DIR) if f.startswith('relatorio_') and f.endswith('.pkl')]
+            
+            for cache_file in sorted(cache_files, reverse=True)[:10]:  # Últimos 10 relatórios
+                try:
+                    cache_path = os.path.join(CACHE_DIR, cache_file)
+                    with open(cache_path, 'rb') as f:
+                        cache_data = pickle.load(f)
+                    
+                    # Extrai ID do nome do arquivo
+                    relatorio_id = cache_file.replace('relatorio_', '').replace('.pkl', '')
+                    
+                    relatorios_recentes.append({
+                        'id': relatorio_id,
+                        'timestamp': cache_data['timestamp'],
+                        'data_formatada': cache_data['timestamp'].strftime('%d/%m/%Y %H:%M'),
+                        'total_itens': len(cache_data['data']) if isinstance(cache_data['data'], list) else 0
+                    })
+                except Exception as e:
+                    logger.warning(f"Erro ao ler cache {cache_file}: {str(e)}")
+                    continue
+        
+        return render_template('index.html', relatorios_recentes=relatorios_recentes)
+    except Exception as e:
+        logger.error(f"Erro ao carregar página inicial: {str(e)}")
+        return render_template('index.html', relatorios_recentes=[])
+
+
+@app.route('/relatorios')
+def listar_relatorios():
+    """Lista todos os relatórios disponíveis no cache"""
+    try:
+        relatorios = []
+        if os.path.exists(CACHE_DIR):
+            cache_files = [f for f in os.listdir(CACHE_DIR) if f.startswith('relatorio_') and f.endswith('.pkl')]
+            
+            for cache_file in sorted(cache_files, reverse=True):
+                try:
+                    cache_path = os.path.join(CACHE_DIR, cache_file)
+                    with open(cache_path, 'rb') as f:
+                        cache_data = pickle.load(f)
+                    
+                    relatorio_id = cache_file.replace('relatorio_', '').replace('.pkl', '')
+                    
+                    relatorios.append({
+                        'id': relatorio_id,
+                        'timestamp': cache_data['timestamp'],
+                        'data_formatada': cache_data['timestamp'].strftime('%d/%m/%Y %H:%M'),
+                        'total_itens': len(cache_data['data']) if isinstance(cache_data['data'], list) else 0
+                    })
+                except Exception as e:
+                    logger.warning(f"Erro ao ler cache {cache_file}: {str(e)}")
+                    continue
+        
+        return render_template('relatorios.html', relatorios=relatorios)
+    except Exception as e:
+        logger.error(f"Erro ao listar relatórios: {str(e)}")
+        flash('Erro ao carregar lista de relatórios', 'error')
+        return redirect(url_for('index'))
+
+
+@app.route('/relatorio/<relatorio_id>')
+def ver_relatorio(relatorio_id):
+    """Visualiza um relatório específico pelo ID"""
+    try:
+        logger.info(f"Carregando relatório específico: {relatorio_id}")
+        
+        # Carrega do cache usando o ID
+        dados_cache = carregar_relatorio_cache(relatorio_id)
+        
+        if not dados_cache:
+            flash('Relatório não encontrado ou expirado. Relatórios ficam disponíveis por 24 horas.', 'error')
+            return redirect(url_for('listar_relatorios'))
+        
+        # Define o ID atual na sessão para outras funcionalidades
+        session['relatorio_id_atual'] = relatorio_id
+        
+        # Processa os dados
+        if isinstance(dados_cache, dict):
+            relatorio_final = dados_cache.get('relatorio_final', [])
+            relatorio_agrupado = dados_cache.get('relatorio_agrupado', {})
+        else:
+            # Formato antigo - converte
+            relatorio_final = dados_cache
+            relatorio_agrupado = {}
+            for item in relatorio_final:
+                responsavel_item = item.get('responsavel', 'Não informado')
+                if responsavel_item not in relatorio_agrupado:
+                    relatorio_agrupado[responsavel_item] = []
+                relatorio_agrupado[responsavel_item].append(item)
+        
+        logger.info(f"Relatório {relatorio_id} carregado: {len(relatorio_final)} itens, {len(relatorio_agrupado)} responsáveis")
+        
+        return render_template('relatorio.html', 
+                             relatorio_final=relatorio_final,
+                             relatorio_agrupado=relatorio_agrupado,
+                             total_negocios=len(relatorio_final))
+        
+    except Exception as e:
+        logger.error(f"Erro ao carregar relatório {relatorio_id}: {str(e)}")
+        flash('Erro ao carregar relatório', 'error')
+        return redirect(url_for('listar_relatorios'))
+
+
+@app.route('/gerar_pdf_relatorio/<relatorio_id>')
+def gerar_pdf_relatorio(relatorio_id):
+    """Gera PDF para um relatório específico pelo ID"""
+    try:
+        logger.info(f"Gerando PDF para relatório: {relatorio_id}")
+        
+        # Carrega do cache usando o ID
+        dados_cache = carregar_relatorio_cache(relatorio_id)
+        
+        if not dados_cache:
+            flash('Relatório não encontrado ou expirado', 'error')
+            return redirect(url_for('listar_relatorios'))
+        
+        # Processa os dados
+        if isinstance(dados_cache, dict):
+            relatorio_final = dados_cache.get('relatorio_final', [])
+            relatorio_agrupado = dados_cache.get('relatorio_agrupado', {})
+        else:
+            # Formato antigo - converte
+            relatorio_final = dados_cache
+            relatorio_agrupado = {}
+            for item in relatorio_final:
+                responsavel_item = item.get('responsavel', 'Não informado')
+                if responsavel_item not in relatorio_agrupado:
+                    relatorio_agrupado[responsavel_item] = []
+                relatorio_agrupado[responsavel_item].append(item)
+        
+        # Gera o PDF usando a função existente
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.lib import colors
+        from io import BytesIO
+        
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4)
+        
+        # Configura estilos
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], 
+                                     textColor=VM_GREEN, spaceAfter=20)
+        
+        story = []
+        
+        # Título
+        story.append(Paragraph("Relatório de Análise Estratégica de Follow-ups", title_style))
+        story.append(Paragraph(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles['Normal']))
+        story.append(Spacer(1, 20))
+        
+        # Agrupa por responsável
+        for responsavel, itens in sorted(relatorio_agrupado.items()):
+            story.append(Paragraph(f"Responsável: {responsavel}", styles['Heading2']))
+            
+            for item in itens:
+                story.append(Paragraph(f"<b>Negócio:</b> {item.get('negocio', 'N/A')}", styles['Normal']))
+                story.append(Paragraph(f"<b>Empresa:</b> {item.get('empresa', 'N/A')}", styles['Normal']))
+                story.append(Paragraph(f"<b>Fase:</b> {item.get('fase', 'N/A')}", styles['Normal']))
+                story.append(Paragraph(f"<b>Próximo Passo:</b> Follow-up #{item.get('proximo_follow', 'N/A')}", styles['Normal']))
+                
+                # Análise da IA
+                analise = item.get('analise_proximo_passo', 'Não disponível')
+                story.append(Paragraph(f"<b>Análise Estratégica:</b>", styles['Normal']))
+                
+                # Formata o texto da análise
+                linhas = analise.split('\n')
+                for linha in linhas:
+                    if linha.strip():
+                        story.append(Paragraph(linha.strip(), styles['Normal']))
+                
+                story.append(Spacer(1, 12))
+            
+            story.append(PageBreak())
+        
+        doc.build(story)
+        
+        # Prepara resposta
+        response = make_response(buffer.getvalue())
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'inline; filename=relatorio_{relatorio_id}_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf'
+        
+        logger.info(f"PDF gerado com sucesso para relatório {relatorio_id}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Erro ao gerar PDF para relatório {relatorio_id}: {str(e)}")
+        flash(f'Erro ao gerar PDF: {str(e)}', 'error')
+        return redirect(url_for('ver_relatorio', relatorio_id=relatorio_id))
 
 
 @app.route('/todos')
@@ -1648,49 +1869,53 @@ def gerar_pdf_responsavel(responsavel):
             for line in lines:
                 line_plain = line.replace('*', '').strip()
                 if not line_plain: continue
-                
+
                 line_upper = line_plain.upper()
-                
-                # Verifica se é um cabeçalho de seção - Lógica mais rigorosa para evitar duplicados
+
                 if 'SITUAÇÃO' in line_upper and 'SIT' not in sections_added:
                     elements.append(Paragraph("🔍 SITUAÇÃO", section_header_style))
                     sections_added.add('SIT')
+                    inline = line_plain.split(':', 1)[1].strip() if ':' in line_plain else ''
+                    if inline:
+                        elements.append(Paragraph(inline, normal_style))
                 elif 'MENSAGEM' in line_upper and 'MSG' not in sections_added:
                     elements.append(Paragraph("💬 MENSAGEM RECOMENDADA", section_header_style))
                     sections_added.add('MSG')
-                elif ('PRÓXIMO PASSO' in line_upper or 'META' in line_upper) and 'PROX' not in sections_added:
+                    inline = line_plain.split(':', 1)[1].strip() if ':' in line_plain else ''
+                    if inline:
+                        elements.append(Paragraph(inline, normal_style))
+                elif ('PRÓXIMO PASSO' in line_upper or 'PRÓXIMOS PASSOS' in line_upper or 'PRÓXIMOS' in line_upper or 'META' in line_upper) and 'PROX' not in sections_added:
                     elements.append(Paragraph("🎯 PRÓXIMO PASSO & META", section_header_style))
                     sections_added.add('PROX')
-                elif any(kw in line_upper for kw in ['SITUAÇÃO', 'MENSAGEM', 'PRÓXIMO PASSO', 'META']):
-                    # Se já adicionou o cabeçalho, ignora a linha que repete o nome da seção
-                    continue
+                    inline = line_plain.split(':', 1)[1].strip() if ':' in line_plain else ''
+                    if inline:
+                        elements.append(Paragraph(inline, normal_style))
                 else:
-                    # Conteúdo normal
                     clean_line = line.replace('**', '').strip()
                     if clean_line.startswith('-') or clean_line.startswith('•'):
                         texto_limpo = clean_line[1:].strip()
                         if texto_limpo:
                             elements.append(Paragraph(f"• {texto_limpo}", normal_style))
-                    else:
+                    elif clean_line:
                         elements.append(Paragraph(clean_line, normal_style))
-            
+
             elements.append(Spacer(1, 15))
-            
+
             # Adiciona ao story (tenta manter junto)
             story.append(KeepTogether(elements))
-            
+
             # Linha divisória sutil
             if i < total:
                 story.append(Spacer(1, 10))
-                story.append(Table([[Spacer(1, 1)]], colWidths=[7*inch], 
+                story.append(Table([[Spacer(1, 1)]], colWidths=[7*inch],
                                   style=[('LINEABOVE', (0,0), (-1,-1), 0.5, colors.HexColor('#e0e0e0'))]))
                 story.append(Spacer(1, 20))
-        
+
         # Rodapé
         story.append(Spacer(1, 30))
-        story.append(Paragraph(f"Relatório individual gerado para: <b>{responsavel}</b>", 
+        story.append(Paragraph(f"Relatório individual gerado para: <b>{responsavel}</b>",
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
-        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.", 
+        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.",
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
         
         # Gera o PDF
@@ -1892,47 +2117,51 @@ def gerar_pdf():
             for line in lines:
                 line_plain = line.replace('*', '').strip()
                 if not line_plain: continue
-                
+
                 line_upper = line_plain.upper()
-                
-                # Verifica se é um cabeçalho de seção - Lógica mais rigorosa para evitar duplicados
+
                 if 'SITUAÇÃO' in line_upper and 'SIT' not in sections_added:
                     elements.append(Paragraph("🔍 SITUAÇÃO", section_header_style))
                     sections_added.add('SIT')
+                    inline = line_plain.split(':', 1)[1].strip() if ':' in line_plain else ''
+                    if inline:
+                        elements.append(Paragraph(inline, normal_style))
                 elif 'MENSAGEM' in line_upper and 'MSG' not in sections_added:
                     elements.append(Paragraph("💬 MENSAGEM RECOMENDADA", section_header_style))
                     sections_added.add('MSG')
-                elif ('PRÓXIMO PASSO' in line_upper or 'META' in line_upper) and 'PROX' not in sections_added:
+                    inline = line_plain.split(':', 1)[1].strip() if ':' in line_plain else ''
+                    if inline:
+                        elements.append(Paragraph(inline, normal_style))
+                elif ('PRÓXIMO PASSO' in line_upper or 'PRÓXIMOS PASSOS' in line_upper or 'PRÓXIMOS' in line_upper or 'META' in line_upper) and 'PROX' not in sections_added:
                     elements.append(Paragraph("🎯 PRÓXIMO PASSO & META", section_header_style))
                     sections_added.add('PROX')
-                elif any(kw in line_upper for kw in ['SITUAÇÃO', 'MENSAGEM', 'PRÓXIMO PASSO', 'META']):
-                    # Se já adicionou o cabeçalho, ignora a linha que repete o nome da seção
-                    continue
+                    inline = line_plain.split(':', 1)[1].strip() if ':' in line_plain else ''
+                    if inline:
+                        elements.append(Paragraph(inline, normal_style))
                 else:
-                    # Conteúdo normal
                     clean_line = line.replace('**', '').strip()
                     if clean_line.startswith('-') or clean_line.startswith('•'):
                         texto_limpo = clean_line[1:].strip()
                         if texto_limpo:
                             elements.append(Paragraph(f"• {texto_limpo}", normal_style))
-                    else:
+                    elif clean_line:
                         elements.append(Paragraph(clean_line, normal_style))
-            
+
             elements.append(Spacer(1, 15))
-            
+
             # Adiciona ao story (tenta manter junto)
             story.append(KeepTogether(elements))
-            
+
             # Linha divisória sutil
             if i < total:
                 story.append(Spacer(1, 10))
-                story.append(Table([[Spacer(1, 1)]], colWidths=[7*inch], 
+                story.append(Table([[Spacer(1, 1)]], colWidths=[7*inch],
                                   style=[('LINEABOVE', (0,0), (-1,-1), 0.5, colors.HexColor('#e0e0e0'))]))
                 story.append(Spacer(1, 20))
-        
+
         # Rodapé
         story.append(Spacer(1, 30))
-        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.", 
+        story.append(Paragraph("Este relatório utiliza inteligência artificial para sugerir as melhores práticas comerciais da Vendamais.",
                              ParagraphStyle('Footer', parent=normal_style, alignment=1, fontSize=8, textColor=colors.gray)))
         
         # Gera o PDF
@@ -1992,5 +2221,5 @@ if __name__ == '__main__':
     debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
     
     logger.info(f"Iniciando servidor Flask na porta {port} (debug={debug})")
-    logger.info(f"Usando API Groq com modelo: {GROQ_MODEL}")
+    logger.info(f"Usando API Gemini com modelo: {GEMINI_MODEL}")
     app.run(debug=debug, port=port)

@@ -6,6 +6,32 @@
     <title>Análise Estratégica de CRM</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .nav-menu {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 10px 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .nav-menu a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            transition: background 0.3s;
+        }
+        .nav-menu a:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .nav-menu .active {
+            background: rgba(255, 255, 255, 0.3);
+        }
+    </style>
 </head>
 <body>
     <div class="container upload-container">
@@ -14,6 +40,18 @@
             
             <h1 class="upload-title">Automação de Follow-up</h1>
             <p class="upload-subtitle">Suba sua planilha e deixe a IA definir a próxima estratégia de venda.</p>
+
+            <!-- Menu de Navegação -->
+            <div class="nav-menu">
+                <div>
+                    <a href="{{ url_for('index') }}" class="active">
+                        <i class="fas fa-home"></i> Início
+                    </a>
+                    <a href="{{ url_for('listar_relatorios') }}">
+                        <i class="fas fa-file-alt"></i> Relatórios
+                    </a>
+                </div>
+            </div>
 
             <form id="uploadForm" action="/processar" method="post" enctype="multipart/form-data">
                 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -57,6 +95,38 @@
                     Analisar Planilha com IA
                 </button>
             </form>
+
+            <!-- Relatórios Recentes -->
+            {% if relatorios_recentes %}
+            <div class="recent-reports" style="margin-top: 30px; padding-top: 20px; border-top: 1px solid rgba(74, 157, 106, 0.2);">
+                <h3 style="color: var(--vm-green); margin-bottom: 15px; font-size: 1.1rem;">
+                    <i class="fas fa-clock"></i> Relatórios Recentes
+                </h3>
+                <div class="reports-list">
+                    {% for relatorio in relatorios_recentes %}
+                    <div class="report-item" style="background: rgba(74, 157, 106, 0.05); padding: 12px; margin-bottom: 8px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <div style="font-size: 0.9rem; color: #666;">
+                                <i class="fas fa-calendar"></i> {{ relatorio.data_formatada }}
+                            </div>
+                            <div style="font-size: 0.8rem; color: #999;">
+                                {{ relatorio.total_itens }} itens analisados
+                            </div>
+                        </div>
+                        <a href="{{ url_for('ver_relatorio', relatorio_id=relatorio.id) }}" 
+                           class="btn btn-sm" style="background: var(--vm-green); color: white; text-decoration: none; padding: 4px 12px; border-radius: 4px; font-size: 0.8rem;">
+                            <i class="fas fa-eye"></i> Ver
+                        </a>
+                    </div>
+                    {% endfor %}
+                </div>
+                <div style="text-align: center; margin-top: 15px;">
+                    <a href="{{ url_for('listar_relatorios') }}" style="color: var(--vm-green); text-decoration: none; font-size: 0.9rem;">
+                        Ver todos os relatórios <i class="fas fa-arrow-right"></i>
+                    </a>
+                </div>
+            </div>
+            {% endif %}
 
             <div id="loadingArea">
                 <div class="spinner"></div>
